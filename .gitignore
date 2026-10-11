@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# CDK
+cdk.out/
+cdk.context.json
+
+# Real environment configs (account ids, emails); example.json is the committed template
+config/*.json
+!config/example.json
+
+# Local MCP client config (carries the deployment URL)
+.mcp.json
+
+# Misc
+*.log
+.DS_Store
