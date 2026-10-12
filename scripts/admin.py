@@ -55,6 +55,7 @@ import json
 import secrets as pysecrets
 import socket
 import sys
+import time
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -414,6 +415,124 @@ def _kms_key_id(config: dict, session) -> str:
     env_project = f"{config['environment_name']}-{config['project_name']}"
     alias = f"alias/{env_project}-tokens"
     return session.client("kms").describe_key(KeyId=alias)["KeyMetadata"]["KeyId"]
+
+
+# -------------------- M6 hosted callback (connect --remote) --------------------
+
+
+def _oauth_callback_url(config: dict, session) -> str:
+    """Resolve the OauthCallbackEndpoint stack output.
+
+    Config may override via `oauth_callback_url`; otherwise we read the
+    CloudFormation output of the lambda stack. One API call per connect,
+    which is fine at CLI speed.
+    """
+    if config.get("oauth_callback_url"):
+        return config["oauth_callback_url"].rstrip("/")
+    env_project = f"{config['environment_name']}-{config['project_name']}"
+    stack_name = f"{env_project}-lambda"
+    cfn = session.client("cloudformation")
+    try:
+        resp = cfn.describe_stacks(StackName=stack_name)
+    except Exception as exc:  # noqa: BLE001
+        sys.exit(
+            f"could not read stack '{stack_name}' to find the OauthCallbackEndpoint "
+            f"output: {exc}. Deploy the lambda stack first, or set oauth_callback_url "
+            f"in config/{config['environment_name']}.json."
+        )
+    for stack in resp.get("Stacks", []):
+        for output in stack.get("Outputs", []):
+            if output.get("OutputKey") == "OauthCallbackEndpoint":
+                return output["OutputValue"].rstrip("/")
+    sys.exit(
+        "OauthCallbackEndpoint not found in the lambda stack outputs; redeploy to pick it up."
+    )
+
+
+def connect_remote(
+    config: dict,
+    session,
+    alias: str,
+    *,
+    scopes_tier: str,
+    page_id: str,
+    ig_alias: str,
+) -> None:
+    entries = {a["alias"]: a for a in config.get("accounts", [])}
+    if alias not in entries:
+        sys.exit(
+            f"account '{alias}' is not in config/{config['environment_name']}.json; add it first"
+        )
+
+    prefix = _secret_prefix(config)
+    creds = _meta_app_creds(session, prefix)
+    scopes = PAGE_SCOPES.get(scopes_tier, PAGE_SCOPES["readonly"])
+
+    callback = _oauth_callback_url(config, session)
+    state = pysecrets.token_urlsafe(16)
+    operator = getpass.getuser()
+
+    table = _table(config, session)
+    expires_at = int(time.time()) + 900
+    table.put_item(
+        Item={
+            "PK": f"CONNECT_STATE#{state}",
+            "SK": "META",
+            "status": "pending",
+            "alias_prefix": alias,
+            "scopes_tier": scopes_tier,
+            "operator_identity": operator,
+            "page_id": page_id,
+            "ig_alias": ig_alias,
+            "requested_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "message": "",
+            "aliases": [],
+            "ttl": expires_at,
+        }
+    )
+
+    consent_params = {
+        "client_id": creds["app_id"],
+        "redirect_uri": callback,
+        "response_type": "code",
+        "scope": ",".join(scopes),
+        "state": state,
+    }
+    consent_url = f"{FB_AUTH_URL}?{urllib.parse.urlencode(consent_params)}"
+
+    print("Open this URL in a browser (any device) to authorize:")
+    print(f"  {consent_url}\n")
+    print(
+        "The hosted callback writes the ACCOUNT item once the browser returns.\n"
+        "Make sure the Meta app's Valid OAuth Redirect URIs includes:\n"
+        f"  {callback}\n"
+    )
+    print(f"Polling state '{state}' for up to 10 minutes...")
+
+    deadline = time.time() + 600
+    poll_interval = 2
+    status = "pending"
+    while time.time() < deadline:
+        item = table.get_item(Key={"PK": f"CONNECT_STATE#{state}", "SK": "META"}).get("Item")
+        if item is None:
+            # TTL could clear it mid-flight if the operator is very slow;
+            # treat the missing row as a terminal timeout.
+            sys.exit("state record expired before completion")
+        status = item.get("status", "pending")
+        if status == "completed":
+            aliases = item.get("aliases", [])
+            print(f"connected: {', '.join(aliases) if aliases else '(none)'}")
+            if any(a == ig_alias for a in aliases):
+                print(
+                    f"add '{ig_alias}' to config/{config['environment_name']}.json's "
+                    "accounts list before the next deploy"
+                )
+            return
+        if status == "error":
+            sys.exit(f"authorization failed: {item.get('message', 'unknown')}")
+        time.sleep(poll_interval)
+
+    sys.exit("no completion recorded; the state record has expired")
 
 
 def list_accounts_cli(config: dict, session) -> None:
@@ -1060,6 +1179,27 @@ def main() -> None:
         if name == "connect":
             sp.add_argument("--alias", required=True)
             sp.add_argument("--scopes", default="readonly", choices=sorted(PAGE_SCOPES))
+            sp.add_argument(
+                "--remote",
+                action="store_true",
+                help=(
+                    "Use the hosted OAuth callback instead of a loopback "
+                    "redirect; works from any machine or phone"
+                ),
+            )
+            sp.add_argument(
+                "--page-id",
+                default="",
+                help=(
+                    "Required with --remote when the authorizing user "
+                    "administers more than one Page"
+                ),
+            )
+            sp.add_argument(
+                "--ig-alias",
+                default="",
+                help="With --remote, also register the linked IG account under this alias",
+            )
         if name in ("approve", "show"):
             sp.add_argument("--draft-id", required=True)
         if name == "reject":
@@ -1097,7 +1237,17 @@ def main() -> None:
         # pulls from PAGE_SCOPES by name.
         global _SCOPE_CHOICE
         _SCOPE_CHOICE = args.scopes
-        connect(config, session, args.alias)
+        if args.remote:
+            connect_remote(
+                config,
+                session,
+                args.alias,
+                scopes_tier=args.scopes,
+                page_id=args.page_id,
+                ig_alias=args.ig_alias,
+            )
+        else:
+            connect(config, session, args.alias)
     elif args.command == "list-accounts":
         list_accounts_cli(config, session)
     elif args.command == "list-drafts":

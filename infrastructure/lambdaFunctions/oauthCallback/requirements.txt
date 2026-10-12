@@ -1,0 +1,6 @@
+# The oauth callback is a plain Starlette app behind Lambda Web Adapter;
+# ASGI goes directly through uvicorn, so no Mangum shim is needed.
+starlette>=0.37
+uvicorn>=0.30
+httpx>=0.27
+boto3

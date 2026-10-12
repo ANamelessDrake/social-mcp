@@ -88,6 +88,27 @@ class LambdaFunctionsStack(Stack):
             ),
         )
 
+        oauth_callback_code = _lambda.Code.from_asset(
+            "infrastructure/lambdaFunctions",
+            bundling=BundlingOptions(
+                image=_lambda.Runtime.PYTHON_3_12.bundling_image,
+                command=[
+                    "bash",
+                    "-c",
+                    " && ".join(
+                        [
+                            "pip install -r oauthCallback/requirements.txt -t /asset-output"
+                            " --platform manylinux2014_aarch64 --implementation cp"
+                            " --python-version 3.12 --only-binary=:all:",
+                            "cp -r oauthCallback/. /asset-output/",
+                            "cp -r sharedModules /asset-output/sharedModules",
+                            "chmod +x /asset-output/run.sh",
+                        ]
+                    ),
+                ],
+            ),
+        )
+
         accounts_env = json.dumps(
             [
                 {
@@ -186,6 +207,48 @@ class LambdaFunctionsStack(Stack):
             "McpEndpoint",
             value=f"{self.function_url.url}mcp",
             description="MCP endpoint URL for client configuration",
+        )
+
+        # The hosted OAuth callback (DESIGN.md M6): a browser-reachable
+        # redirect target so operators can run `admin.py connect --remote`
+        # from a laptop without AWS credentials or from a phone.
+        self.oauth_callback = _lambda.Function(
+            self,
+            "OauthCallback",
+            function_name=f"{env_project}-oauth-callback",
+            description="Hosted OAuth callback for admin.py connect --remote",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            architecture=_lambda.Architecture.ARM_64,
+            handler="run.sh",
+            code=oauth_callback_code,
+            layers=[lwa_layer],
+            memory_size=256,
+            timeout=Duration.seconds(60),
+            environment={
+                "AWS_LAMBDA_EXEC_WRAPPER": "/opt/bootstrap",
+                "AWS_LWA_READINESS_CHECK_PATH": "/health",
+                "PORT": "8000",
+                "CORE_TABLE": database.core_table.table_name,
+                "TOKEN_KMS_KEY_ID": database.token_key.key_arn,
+                "META_APP_SECRET": secrets.meta_app.secret_name,
+            },
+        )
+        secrets.meta_app.grant_read(self.oauth_callback)
+        database.core_table.grant_read_write_data(self.oauth_callback)
+        database.token_key.grant_encrypt_decrypt(self.oauth_callback)
+
+        self.oauth_callback_url = self.oauth_callback.add_function_url(
+            auth_type=_lambda.FunctionUrlAuthType.NONE,
+        )
+
+        CfnOutput(
+            self,
+            "OauthCallbackEndpoint",
+            value=self.oauth_callback_url.url,
+            description=(
+                "Hosted OAuth callback URL; register this in the Meta app's "
+                "Facebook Login product under Valid OAuth Redirect URIs"
+            ),
         )
 
     def wire_scheduler(

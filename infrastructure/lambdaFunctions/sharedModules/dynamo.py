@@ -19,6 +19,11 @@ section 10 + 7):
   (DESIGN.md section 7.1); reversible from admin.py.
 - `AUDIT#<account>`, SK=`TS#<iso8601>#<ulid>` -> append-only audit log.
 - `KILL#`, SK=`global` -> global publishing kill switch (M2).
+- `CONNECT_STATE#<state>`, SK=`META` -> short-lived (15 minute TTL) record
+  the admin CLI writes before opening the browser so the hosted OAuth
+  callback can match the returning code to the right alias and scope
+  tier (DESIGN.md section 3 / M6). Single-use: a status transition from
+  `pending` to `completed` or `error` is final; the TTL cleans the row.
 
 Account items are written by `scripts/admin.py connect`; drafts and
 staged changes are written by the MCP server; approvals by `admin.py
@@ -466,3 +471,87 @@ def set_publishing_disabled(disabled: bool, actor: str = "operator") -> None:
             "set_at": _now(),
         }
     )
+
+
+# -------------------- M6 hosted OAuth connect state --------------------
+
+# One record per outstanding `admin.py connect --remote` invocation. The
+# admin CLI writes it (status=pending), then prints a callback URL carrying
+# ?state=<random> and polls this record every 2 seconds; the hosted
+# callback (oauthCallback/app.py) updates it to `completed` or `error`
+# once Meta returns.
+
+CONNECT_STATE_TTL_SECONDS = 900  # 15 minutes
+
+
+def write_connect_state(
+    state: str,
+    *,
+    alias_prefix: str,
+    scopes_tier: str,
+    operator_identity: str,
+    page_id: str = "",
+    ig_alias: str = "",
+) -> dict:
+    import time
+
+    expires_at = int(time.time()) + CONNECT_STATE_TTL_SECONDS
+    item = {
+        "PK": f"CONNECT_STATE#{state}",
+        "SK": "META",
+        "status": "pending",
+        "alias_prefix": alias_prefix,
+        "scopes_tier": scopes_tier,
+        "operator_identity": operator_identity,
+        "page_id": page_id,
+        "ig_alias": ig_alias,
+        "requested_at": _now(),
+        "message": "",
+        "aliases": [],
+        "ttl": expires_at,
+    }
+    core_table().put_item(Item=item)
+    return item
+
+
+def read_connect_state(state: str) -> dict | None:
+    resp = core_table().get_item(Key={"PK": f"CONNECT_STATE#{state}", "SK": "META"})
+    return resp.get("Item")
+
+
+def update_connect_state(
+    state: str,
+    *,
+    status: str,
+    message: str = "",
+    aliases: list[str] | None = None,
+) -> None:
+    """Transition a state record. Guards against overwriting a terminal row.
+
+    The callback and the admin CLI's error path both call this, but a row
+    already in `completed` or `error` is final: the second caller's write
+    is rejected by a condition expression. That stops a replayed Meta
+    callback from re-overwriting a completed record with an error, and
+    stops a late CLI timeout from clobbering a succeeded record.
+    """
+    expr_values = {
+        ":s": status,
+        ":m": message,
+        ":a": list(aliases) if aliases is not None else [],
+        ":now": _now(),
+        ":pending": "pending",
+    }
+    try:
+        core_table().update_item(
+            Key={"PK": f"CONNECT_STATE#{state}", "SK": "META"},
+            UpdateExpression=(
+                "SET #s = :s, message = :m, aliases = :a, completed_at = :now"
+            ),
+            ConditionExpression="#s = :pending",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues=expr_values,
+        )
+    except Exception as exc:  # noqa: BLE001 - ConditionalCheckFailed is expected
+        name = type(exc).__name__
+        if "ConditionalCheckFailed" not in name:
+            raise

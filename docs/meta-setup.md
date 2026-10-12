@@ -303,3 +303,65 @@ python scripts/admin.py approve --env dev --draft-id <id>
 #   publish_draft(draft_id=<id>)  ->  post_id (ig_media_id) + permalink
 ```
 
+## 10. (M6) Hosted OAuth callback for `connect --remote`
+
+The default `connect` flow uses a loopback redirect on the machine
+running the script, which requires both AWS credentials and a browser on
+that same machine. M6 adds a hosted callback as a separate Lambda with
+its own Function URL so you can run the browser consent from a laptop
+with no AWS credentials, from a phone, or from a headless pipeline that
+only has the public callback URL.
+
+### Register the callback URL in the Meta app
+
+After deploying the lambda stack, read the `OauthCallbackEndpoint`
+output:
+
+```bash
+aws cloudformation describe-stacks --stack-name dev-socialmcp-lambda \
+  --query 'Stacks[0].Outputs[?OutputKey==`OauthCallbackEndpoint`].OutputValue' \
+  --output text
+```
+
+In the Meta app's Facebook Login for Business product, under Settings,
+add the full URL (including the trailing `/`) to **Valid OAuth Redirect
+URIs**. The URL is already https (Function URLs are), which Meta
+requires.
+
+### Run `connect --remote`
+
+```bash
+python scripts/admin.py connect --env dev --alias main-page --remote \
+    [--scopes publish-ig] [--page-id <id>] [--ig-alias main-page-ig]
+```
+
+- The CLI writes a `CONNECT_STATE#<state>` DynamoDB row with a 15-minute
+  TTL and prints the Facebook authorization URL (with the state baked
+  in).
+- Open that URL in any browser (same machine, another machine, phone).
+  Facebook returns the browser to the hosted callback with
+  `?code=&state=`.
+- The callback exchanges the code for a long-lived user token,
+  enumerates Pages, writes the ACCOUNT item(s), and transitions the
+  state record to `completed` with the created aliases.
+- The CLI, which has been polling the state row every 2 seconds, sees
+  the completion and prints the aliases. If the authorizing user
+  administers more than one Page, re-run with `--page-id <id>` naming
+  the specific Page.
+
+The state row is single-use: a replayed callback for the same state
+returns an error page and does not touch the row. If the browser never
+returns, the row expires on its own via DynamoDB TTL after 15 minutes.
+
+### When to use which flow
+
+| Scenario | Flow |
+|---|---|
+| Developer with AWS creds and a browser locally | `connect` (loopback) |
+| Laptop with no AWS creds, authorizing from a phone, headless CI | `connect --remote` |
+| Multi-Page authorizing user and hosted flow | `connect --remote --page-id <id>` |
+
+Both flows end in the same place: a KMS-encrypted ACCOUNT item in the
+core table with a long-lived user token for refresh and a non-expiring
+Page token for day-to-day calls.
+
