@@ -164,6 +164,27 @@ class InstagramProvider:
             insights=_insights_dict(insights),
         )
 
+    def fetch_comment(self, comment_id: str) -> dict:
+        """One-shot GET /{comment_id}?fields=... for webhookIngest.
+
+        Returns a dict shaped like what list_comments's inner mapping
+        produces. IG comments webhooks fire on new comments; the
+        standing scope is `instagram_manage_comments` (added at M3), so
+        this call hits the Graph with the stored Page token.
+        """
+        registry.require_scope(self.alias, "instagram_manage_comments")
+        params = {"fields": "id,text,username,timestamp,like_count"}
+        raw = self._client.get(f"/{comment_id}", params=params) or {}
+        return {
+            "comment_id": raw.get("id", ""),
+            "created_time": raw.get("timestamp", ""),
+            "author": raw.get("username", ""),
+            "text": raw.get("text", ""),
+            "is_hidden": False,
+            "thread_id": raw.get("id", ""),
+            "reply_count": 0,
+        }
+
     def list_comments(self, post_id: str, limit: int) -> list[Comment]:
         registry.require_scope(self.alias, "instagram_basic")
         fields = (

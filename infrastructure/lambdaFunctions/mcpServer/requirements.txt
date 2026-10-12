@@ -4,3 +4,5 @@
 mcp==1.28.1
 httpx>=0.27
 uvicorn>=0.30
+# wait_for_comments subscribes to AppSync Events over WebSocket (M7)
+websocket-client>=1.6

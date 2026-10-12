@@ -365,3 +365,58 @@ Both flows end in the same place: a KMS-encrypted ACCOUNT item in the
 core table with a long-lived user token for refresh and a non-expiring
 Page token for day-to-day calls.
 
+
+## 11. Comment webhooks (M7)
+
+Milestone 7 adds real-time comment delivery via Meta's Webhook product
+plus a long-poll MCP tool so an agent can block on `wait_for_comments`
+and wake the moment someone comments on a Page or Instagram post.
+
+### One-time: add the Webhook product to the Meta app
+
+1. In the Meta app dashboard, add the **Webhooks** product.
+2. For the **Page** object, set the Callback URL to the
+   `WebhookIngestEndpoint` CFN output (ends in `.lambda-url.<region>.on.aws/`).
+3. Paste the value of `{Env}-SocialMcp-WebhookVerifyToken` into the
+   Verify Token field; Meta will GET the callback and the ingest Lambda
+   will echo the challenge.
+4. Subscribe to the `comments` field (and `feed` if you want post-level
+   events later).
+5. Repeat for the **Instagram** object with the same callback URL;
+   subscribe to the `comments` field.
+
+### Per-account: tell Meta to deliver this account's events
+
+Register each Page / IG account's events with the app's callback:
+
+```bash
+python scripts/admin.py webhook-subscribe --env dev --alias main-page
+python scripts/admin.py webhook-subscribe --env dev --alias main-page-ig
+```
+
+See the current state at any time:
+
+```bash
+python scripts/admin.py webhook-show --env dev
+```
+
+Unsubscribe to turn delivery off without touching the Meta app:
+
+```bash
+python scripts/admin.py webhook-unsubscribe --env dev --alias main-page
+```
+
+### What the tools do
+
+- `check_comments(account?, post_id?, limit?)`: pulls new events since
+  the caller's last check. Each (account, post_id) filter keeps its own
+  cursor so a filtered check never consumes an unfiltered one.
+- `wait_for_comments(timeout_seconds?, account?, post_id?)`: subscribes
+  over WebSocket, drains the store so the subscribe-then-store race is
+  zero, then blocks until a matching event arrives or the timeout fires.
+  Timeout is clamped to the Lambda budget (max 840 seconds).
+
+The DynamoDB write in webhookIngest is the durability guarantee; the
+AppSync Events publish is best-effort fan-out to whoever is currently
+subscribed. A comment that lands while no session is waiting is still
+there on the next `check_comments` call.

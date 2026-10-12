@@ -8,6 +8,7 @@ use the tool, flat string/int parameters, defaults for everything optional.
 from mcp.server.fastmcp import FastMCP
 
 from . import (
+    check_comments,
     delete_post,
     discard_draft,
     draft_post,
@@ -25,6 +26,7 @@ from . import (
     schedule_draft,
     stage_media,
     update_draft,
+    wait_for_comments,
 )
 
 
@@ -50,3 +52,6 @@ def register_all(mcp: FastMCP) -> None:
     mcp.tool()(hide_comment.hide_comment)
     # media staging + instagram publishing (M5)
     mcp.tool()(stage_media.stage_media)
+    # comment webhooks + long-poll (M7)
+    mcp.tool()(check_comments.check_comments)
+    mcp.tool()(wait_for_comments.wait_for_comments)

@@ -35,6 +35,7 @@ class LambdaFunctionsStack(Stack):
         secrets,
         database,
         media=None,
+        events=None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -109,6 +110,27 @@ class LambdaFunctionsStack(Stack):
             ),
         )
 
+        webhook_ingest_code = _lambda.Code.from_asset(
+            "infrastructure/lambdaFunctions",
+            bundling=BundlingOptions(
+                image=_lambda.Runtime.PYTHON_3_12.bundling_image,
+                command=[
+                    "bash",
+                    "-c",
+                    " && ".join(
+                        [
+                            "pip install -r webhookIngest/requirements.txt -t /asset-output"
+                            " --platform manylinux2014_aarch64 --implementation cp"
+                            " --python-version 3.12 --only-binary=:all:",
+                            "cp -r webhookIngest/. /asset-output/",
+                            "cp -r sharedModules /asset-output/sharedModules",
+                            "chmod +x /asset-output/run.sh",
+                        ]
+                    ),
+                ],
+            ),
+        )
+
         accounts_env = json.dumps(
             [
                 {
@@ -135,6 +157,14 @@ class LambdaFunctionsStack(Stack):
             # the Publisher presigns an object from this bucket and tears it
             # down after FINISHED (DESIGN.md section 9).
             shared_env["MEDIA_BUCKET"] = media.media_bucket.bucket_name
+        if events is not None:
+            # webhookIngest publishes comment events; mcpServer subscribes
+            # for wait_for_comments. Both share the server-side API key
+            # (DESIGN.md M7); it never reaches an MCP client.
+            shared_env["EVENTS_HTTP_ENDPOINT"] = events.http_endpoint
+            shared_env["EVENTS_HTTP_HOST"] = events.http_host
+            shared_env["EVENTS_REALTIME_ENDPOINT"] = events.realtime_endpoint
+            shared_env["EVENTS_API_KEY"] = events.api_key
 
         self.publisher = _lambda.Function(
             self,
@@ -248,6 +278,60 @@ class LambdaFunctionsStack(Stack):
             description=(
                 "Hosted OAuth callback URL; register this in the Meta app's "
                 "Facebook Login product under Valid OAuth Redirect URIs"
+            ),
+        )
+
+        # The Meta Webhook ingest (DESIGN.md M7): a public Function URL
+        # that verifies X-Hub-Signature-256 and stores + fans out
+        # comment events for live wait_for_comments sessions.
+        webhook_env = {
+            "AWS_LAMBDA_EXEC_WRAPPER": "/opt/bootstrap",
+            "AWS_LWA_READINESS_CHECK_PATH": "/health",
+            "PORT": "8000",
+            "CORE_TABLE": database.core_table.table_name,
+            "TOKEN_KMS_KEY_ID": database.token_key.key_arn,
+            "META_APP_SECRET": secrets.meta_app.secret_name,
+            "WEBHOOK_VERIFY_TOKEN_SECRET": (
+                secrets.webhook_verify_token.secret_name
+            ),
+        }
+        if events is not None:
+            webhook_env["EVENTS_HTTP_ENDPOINT"] = events.http_endpoint
+            webhook_env["EVENTS_API_KEY"] = events.api_key
+
+        self.webhook_ingest = _lambda.Function(
+            self,
+            "WebhookIngest",
+            function_name=f"{env_project}-webhook-ingest",
+            description=(
+                "Meta Webhook receiver for comment events; signature "
+                "verification, dedupe, body fetch, AppSync Events publish"
+            ),
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            architecture=_lambda.Architecture.ARM_64,
+            handler="run.sh",
+            code=webhook_ingest_code,
+            layers=[lwa_layer],
+            memory_size=512,
+            timeout=Duration.seconds(30),
+            environment=webhook_env,
+        )
+        secrets.meta_app.grant_read(self.webhook_ingest)
+        secrets.webhook_verify_token.grant_read(self.webhook_ingest)
+        database.core_table.grant_read_write_data(self.webhook_ingest)
+        database.token_key.grant_encrypt_decrypt(self.webhook_ingest)
+
+        self.webhook_ingest_url = self.webhook_ingest.add_function_url(
+            auth_type=_lambda.FunctionUrlAuthType.NONE,
+        )
+
+        CfnOutput(
+            self,
+            "WebhookIngestEndpoint",
+            value=self.webhook_ingest_url.url,
+            description=(
+                "Meta Webhook receiver URL; register this as the Callback "
+                "URL for the Pages and Instagram webhook subscriptions"
             ),
         )
 

@@ -1152,6 +1152,118 @@ def audit_cli(config: dict, session, account: str, since: str, limit: int) -> No
         )
 
 
+# -------------------- M7 webhook subscription management --------------------
+#
+# Meta's `/subscribed_apps` edges tell a Page or an IG user to deliver its
+# comment events to the app's registered Webhook callback. One call per
+# account registers it; one DELETE unsubscribes.
+
+
+def _subscribe_edge(provider: str, account_id: str, token: str) -> dict:
+    import urllib.parse
+    import urllib.request
+
+    base = "https://graph.facebook.com/v26.0"
+    if provider == "instagram":
+        fields = "comments"
+        url = f"{base}/{account_id}/subscribed_apps"
+    else:
+        fields = "feed,comments"
+        url = f"{base}/{account_id}/subscribed_apps"
+    data = urllib.parse.urlencode(
+        {"subscribed_fields": fields, "access_token": token}
+    ).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _unsubscribe_edge(account_id: str, token: str) -> dict:
+    import urllib.parse
+    import urllib.request
+
+    base = "https://graph.facebook.com/v26.0"
+    url = (
+        f"{base}/{account_id}/subscribed_apps?"
+        + urllib.parse.urlencode({"access_token": token})
+    )
+    req = urllib.request.Request(url, method="DELETE")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _read_edge(account_id: str, token: str) -> dict:
+    import urllib.parse
+    import urllib.request
+
+    base = "https://graph.facebook.com/v26.0"
+    url = (
+        f"{base}/{account_id}/subscribed_apps?"
+        + urllib.parse.urlencode({"access_token": token})
+    )
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _decrypt_page_token(session, token_ct, kms_key_id: str) -> str:
+    kms = session.client("kms")
+    resp = kms.decrypt(KeyId=kms_key_id, CiphertextBlob=bytes(token_ct))
+    return resp["Plaintext"].decode()
+
+
+def _lookup_account(table, alias: str) -> dict:
+    item = table.get_item(Key={"PK": f"ACCOUNT#{alias}", "SK": "META"}).get("Item")
+    if item is None:
+        sys.exit(f"account '{alias}' not found; run `connect` first")
+    return item
+
+
+def webhook_subscribe_cli(config: dict, session, alias: str) -> None:
+    table = _table(config, session)
+    account = _lookup_account(table, alias)
+    token = _decrypt_page_token(
+        session, account["page_token_ct"], _kms_key_id(config, session)
+    )
+    result = _subscribe_edge(account["provider"], account["account_id"], token)
+    print(f"subscribed {alias}: {result}")
+
+
+def webhook_unsubscribe_cli(config: dict, session, alias: str) -> None:
+    table = _table(config, session)
+    account = _lookup_account(table, alias)
+    token = _decrypt_page_token(
+        session, account["page_token_ct"], _kms_key_id(config, session)
+    )
+    result = _unsubscribe_edge(account["account_id"], token)
+    print(f"unsubscribed {alias}: {result}")
+
+
+def webhook_show_cli(config: dict, session) -> None:
+    table = _table(config, session)
+    resp = table.scan(
+        FilterExpression="begins_with(PK, :p)",
+        ExpressionAttributeValues={":p": "ACCOUNT#"},
+    )
+    kms_key = _kms_key_id(config, session)
+    for item in resp.get("Items", []):
+        alias = item["PK"].split("#", 1)[1]
+        token_ct = item.get("page_token_ct")
+        if token_ct is None:
+            print(f"{alias}: no token stored")
+            continue
+        try:
+            token = _decrypt_page_token(session, token_ct, kms_key)
+            info = _read_edge(item["account_id"], token)
+            data = (info or {}).get("data") or []
+            subscribed = bool(data)
+            fields = (
+                ",".join(data[0].get("subscribed_fields", [])) if data else ""
+            )
+            print(f"{alias}: subscribed={subscribed} fields={fields}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"{alias}: error reading subscription state: {exc}")
+
+
 # ----------------------------------- main -----------------------------------
 
 
@@ -1172,6 +1284,9 @@ def main() -> None:
         "approve-hide",
         "disable-publishing",
         "audit",
+        "webhook-subscribe",
+        "webhook-unsubscribe",
+        "webhook-show",
     ):
         sp = sub.add_parser(name)
         sp.add_argument("--env", required=True)
@@ -1227,6 +1342,8 @@ def main() -> None:
             sp.add_argument("--account", default="")
             sp.add_argument("--since", default="")
             sp.add_argument("--limit", type=int, default=50)
+        if name in ("webhook-subscribe", "webhook-unsubscribe"):
+            sp.add_argument("--alias", required=True)
 
     args = parser.parse_args()
     config = _load_config(args.env)
@@ -1270,6 +1387,12 @@ def main() -> None:
         disable_publishing_cli(config, session, args.enable)
     elif args.command == "audit":
         audit_cli(config, session, args.account, args.since, args.limit)
+    elif args.command == "webhook-subscribe":
+        webhook_subscribe_cli(config, session, args.alias)
+    elif args.command == "webhook-unsubscribe":
+        webhook_unsubscribe_cli(config, session, args.alias)
+    elif args.command == "webhook-show":
+        webhook_show_cli(config, session)
     else:  # pragma: no cover - argparse guards above
         sys.exit(f"unknown command: {args.command}")
 

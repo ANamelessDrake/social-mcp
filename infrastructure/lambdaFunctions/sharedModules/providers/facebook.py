@@ -111,6 +111,30 @@ class FacebookProvider:
             insights=_insights_dict(insights),
         )
 
+    def fetch_comment(self, comment_id: str) -> dict:
+        """One-shot GET /{comment_id}?fields=... for webhookIngest.
+
+        Returns a dict shaped like what list_comments produces, with
+        enough fields to populate the stored COMMENT_EVENT item. Called
+        on first sight of a comment id on a Page webhook; subsequent
+        events for the same id are deduped before this method is called
+        again.
+        """
+        params = {
+            "fields": "id,from,message,created_time,is_hidden,comment_count,parent"
+        }
+        raw = self._client.get(f"/{comment_id}", params=params) or {}
+        parent = (raw.get("parent") or {}).get("id") or raw.get("id", "")
+        return {
+            "comment_id": raw.get("id", ""),
+            "created_time": raw.get("created_time", ""),
+            "author": (raw.get("from") or {}).get("name", ""),
+            "text": raw.get("message", ""),
+            "is_hidden": bool(raw.get("is_hidden", False)),
+            "thread_id": parent,
+            "reply_count": int(raw.get("comment_count", 0)),
+        }
+
     def list_comments(self, post_id: str, limit: int) -> list[Comment]:
         params = {
             "fields": "id,from,message,created_time,is_hidden,comment_count,parent",

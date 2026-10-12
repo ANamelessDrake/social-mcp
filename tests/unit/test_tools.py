@@ -34,7 +34,11 @@ M3_TOOLS = {
 M5_TOOLS = {
     "stage_media",
 }
-EXPECTED = M1_TOOLS | M2_TOOLS | M3_TOOLS | M5_TOOLS
+M7_TOOLS = {
+    "check_comments",
+    "wait_for_comments",
+}
+EXPECTED = M1_TOOLS | M2_TOOLS | M3_TOOLS | M5_TOOLS | M7_TOOLS
 
 
 @pytest.fixture

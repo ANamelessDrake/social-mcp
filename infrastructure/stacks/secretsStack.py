@@ -50,6 +50,17 @@ class SecretsStack(Stack):
             f"{prefix}-MetaApp",
             "Meta Business app credentials JSON (app_id, app_secret)",
         )
+        # Verify token for Meta's Webhook subscription (M7). Random at deploy
+        # time; the operator pastes this value into the Meta app's Webhook
+        # product. The ingest Lambda checks it on the GET handshake.
+        self.webhook_verify_token = self._secret(
+            f"{prefix}-WebhookVerifyToken",
+            "Verify token Meta sends on the Webhook subscription handshake",
+            generate=secretsmanager.SecretStringGenerator(
+                password_length=32,
+                exclude_punctuation=True,
+            ),
+        )
 
     def _secret(
         self,

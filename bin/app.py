@@ -10,6 +10,7 @@ from aws_cdk import Environment
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(project_root)
 
+from infrastructure.stacks.appsyncEventsStack import AppSyncEventsStack  # noqa: E402
 from infrastructure.stacks.dynamoDbStack import DynamoDbStack  # noqa: E402
 from infrastructure.stacks.lambdaFunctionStack import LambdaFunctionsStack  # noqa: E402
 from infrastructure.stacks.monitoringStack import MonitoringStack  # noqa: E402
@@ -58,6 +59,13 @@ s3_stack = S3Stack(
     env=env,
 )
 
+appsync_events_stack = AppSyncEventsStack(
+    app,
+    f"{env_project}-events",
+    config=config,
+    env=env,
+)
+
 lambda_stack = LambdaFunctionsStack(
     app,
     f"{env_project}-lambda",
@@ -65,11 +73,13 @@ lambda_stack = LambdaFunctionsStack(
     secrets=secrets_stack,
     database=dynamodb_stack,
     media=s3_stack,
+    events=appsync_events_stack,
     env=env,
 )
 lambda_stack.add_dependency(secrets_stack)
 lambda_stack.add_dependency(dynamodb_stack)
 lambda_stack.add_dependency(s3_stack)
+lambda_stack.add_dependency(appsync_events_stack)
 
 # The Scheduler stack creates a role whose policy names the Publisher ARN,
 # and the Lambda stack adds a policy to the MCP role naming the schedule

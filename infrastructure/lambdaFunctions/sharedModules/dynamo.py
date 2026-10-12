@@ -555,3 +555,87 @@ def update_connect_state(
         name = type(exc).__name__
         if "ConditionalCheckFailed" not in name:
             raise
+
+
+# -------------------- M7 comment event store --------------------
+#
+# webhookIngest writes one COMMENT_EVENT#<alias> item per comment, SK
+# `TS#<created_time>#<comment_id>`, so the alias partition sorts
+# chronologically for check_comments and the composite key dedupes
+# Meta's retry storms. Per-identity read cursors live on CURSOR#<identity>
+# rows (SK=`SCOPE#<account>#<post_id>`), matching slack-mcp's per-scope
+# cursor pattern so a filtered check never consumes an unfiltered one.
+
+
+def comments_after(
+    account: str, after_sk: str = "", limit: int = 20, post_id: str = ""
+) -> list[dict]:
+    """Return stored comment events newer than `after_sk`, oldest first.
+
+    `after_sk` is the SK (`TS#<time>#<comment_id>`) of the last comment
+    the caller consumed; a post_id filter is applied after the query
+    because the partition is per-account, not per-post."""
+    kwargs = {
+        "KeyConditionExpression": "PK = :pk",
+        "ExpressionAttributeValues": {":pk": f"COMMENT_EVENT#{account}"},
+        "ScanIndexForward": True,
+        "Limit": max(1, min(int(limit or 20), 100)),
+    }
+    if after_sk:
+        kwargs["KeyConditionExpression"] += " AND SK > :sk"
+        kwargs["ExpressionAttributeValues"][":sk"] = after_sk
+    resp = core_table().query(**kwargs)
+    rows = [
+        {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+        | {"_sk": item["SK"]}
+        for item in resp.get("Items", [])
+    ]
+    if post_id:
+        rows = [r for r in rows if r.get("post_id") == post_id]
+    return rows
+
+
+def list_comment_accounts() -> list[str]:
+    """Aliases known to have received at least one comment event.
+
+    Powers `check_comments` with an empty `account`: a scan hop that
+    costs nothing at personal scale (and only called by the admin / tool
+    code paths, not the per-webhook hot path)."""
+    try:
+        resp = core_table().scan(
+            FilterExpression="begins_with(PK, :p)",
+            ExpressionAttributeValues={":p": "COMMENT_EVENT#"},
+            ProjectionExpression="PK",
+            Limit=1000,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    aliases = {item["PK"].split("#", 1)[1] for item in resp.get("Items", [])}
+    return sorted(aliases)
+
+
+def get_comment_cursor(identity: str, scope: str) -> str:
+    resp = core_table().get_item(
+        Key={"PK": f"CURSOR#{identity}", "SK": f"COMMENT#{scope}"}
+    )
+    item = resp.get("Item")
+    if item is None:
+        return ""
+    return item.get("cursor", "")
+
+
+def set_comment_cursor(identity: str, scope: str, cursor: str) -> None:
+    core_table().put_item(
+        Item={
+            "PK": f"CURSOR#{identity}",
+            "SK": f"COMMENT#{scope}",
+            "cursor": cursor,
+            "updated_at": _now(),
+        }
+    )
+
+
+def comment_cursor_scope(account: str, post_id: str) -> str:
+    """A filtered check keeps its own cursor so skipping a post never
+    consumes the comment for a wider check later."""
+    return f"{account}#{post_id or '*'}"

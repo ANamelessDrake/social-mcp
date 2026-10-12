@@ -1,0 +1,35 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "100000000000000",
+      "time": 1800000000,
+      "changes": [
+        {
+          "field": "comments",
+          "value": {
+            "from": {
+              "id": "900000000000000",
+              "name": "Example Commenter"
+            },
+            "post": {
+              "status_type": "added_photos",
+              "is_published": true,
+              "updated_time": "2026-10-01T12:00:00+0000",
+              "permalink_url": "https://www.facebook.com/example/posts/pfbid",
+              "promotion_status": "inactive",
+              "id": "100000000000000_777777777777777"
+            },
+            "message": "Looks great, where can I buy this?",
+            "post_id": "100000000000000_777777777777777",
+            "comment_id": "777777777777777_111111111111111",
+            "created_time": 1800000030,
+            "item": "comment",
+            "parent_id": "100000000000000_777777777777777",
+            "verb": "add"
+          }
+        }
+      ]
+    }
+  ]
+}
