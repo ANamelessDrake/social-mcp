@@ -57,17 +57,36 @@ def test_capabilities_differ_between_providers():
     assert Capability.INSIGHTS in fb.capabilities and Capability.INSIGHTS in ig.capabilities
 
 
-def test_instagram_reads_are_implemented_in_m4():
-    """IG read ops no longer raise NotImplementedError (M4 shipped)."""
+def test_instagram_reads_and_publish_are_implemented(monkeypatch):
+    """IG reads landed in M4; publish and delete landed in M5."""
+    import json as _json
+
+    monkeypatch.setenv(
+        "ACCOUNTS",
+        _json.dumps(
+            [
+                {
+                    "alias": "ig",
+                    "provider": "instagram",
+                    "publish_enabled": False,
+                    "publish_mode": "manual",
+                    "auto_for_kinds": [],
+                    "policy": {},
+                }
+            ]
+        ),
+    )
+    from sharedModules import registry
+
+    registry.all_accounts.cache_clear()
+
     ig = InstagramProvider("ig")
-    # The methods exist and are callable; actual Graph calls happen inside
-    # the real provider logic and need an `_client`, so a bare attribute
-    # check plus a publish/write assertion is the right shape here.
     assert callable(ig.list_posts)
     assert callable(ig.get_post)
     assert callable(ig.list_comments)
     assert callable(ig.get_insights)
-    # Writes still raise, pending M5.
-    with pytest.raises(NotImplementedError) as exc:
-        ig.publish(object())
-    assert "m5" in str(exc.value).lower()
+    assert callable(ig.publish)
+    assert callable(ig.delete_post)
+    # Edits still raise: IG media endpoints never supported content edits.
+    with pytest.raises(NotImplementedError):
+        ig.edit_post("123", "text")

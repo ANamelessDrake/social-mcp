@@ -118,6 +118,41 @@ PAGE_SCOPES = {
         "pages_manage_engagement",
         "instagram_manage_comments",
     ],
+    "publish-ig": [
+        # M5 Instagram publishing tier. Carries everything `publish` has
+        # plus the IG publishing scope; one consent dialog covers Pages
+        # and Instagram.
+        "pages_show_list",
+        "pages_read_engagement",
+        "pages_read_user_content",
+        "read_insights",
+        "business_management",
+        "public_profile",
+        "instagram_basic",
+        "instagram_manage_insights",
+        "pages_manage_posts",
+        "publish_video",
+        "instagram_content_publish",
+    ],
+    "delete-contents": [
+        # Everything in `publish-ig` plus the scope IG added for media
+        # deletes on 2025-12-03. Narrow tier so operators who do not
+        # ever delete IG media never grant it.
+        "pages_show_list",
+        "pages_read_engagement",
+        "pages_read_user_content",
+        "read_insights",
+        "business_management",
+        "public_profile",
+        "instagram_basic",
+        "instagram_manage_insights",
+        "pages_manage_posts",
+        "publish_video",
+        "pages_manage_engagement",
+        "instagram_manage_comments",
+        "instagram_content_publish",
+        "instagram_manage_contents",
+    ],
 }
 
 

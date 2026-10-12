@@ -234,3 +234,72 @@ python scripts/admin.py connect --env dev --alias main-page --scopes readonly
 
 This overwrites the Page tokens on the Page item (and, through the shared
 token, re-enables the linked IG alias).
+
+## 9. (M5) Instagram publishing
+
+M5 lands the container flow, the S3 media staging bucket, and the
+publishing-limit precheck. Two scope tiers are relevant:
+
+- `--scopes publish-ig` adds `instagram_content_publish` so an IG alias
+  can create and publish media containers.
+- `--scopes delete-contents` adds `instagram_manage_contents` on top
+  (Meta required it for IG media deletion on 2025-12-03). Only grant
+  this tier when the deployment needs to delete IG media; nothing in
+  M5 publishes requires it.
+
+Re-run `admin.py connect` once per Page you want to publish from:
+
+```bash
+python scripts/admin.py connect --env dev --alias main-page --scopes publish-ig
+# or, to also allow IG media deletes:
+python scripts/admin.py connect --env dev --alias main-page --scopes delete-contents
+```
+
+### Media staging
+
+Instagram's publish flow requires that `image_url` and `video_url` be
+publicly reachable; Meta fetches the bytes before `media_publish`. The
+flow is:
+
+1. Agent calls `stage_media(data_base64, mime_type)` and gets back an
+   `s3://` key.
+2. Agent passes that key (comma-separated with others for a carousel)
+   to `draft_post(media='s3://...')`.
+3. On publish, the Publisher presigns the object for 15 minutes, hands
+   the URL to Meta, polls `status_code` until FINISHED, publishes, and
+   deletes the staged bytes.
+4. If anything fails before step 3's delete, the bucket's 24-hour
+   lifecycle rule removes the object.
+
+The staging key always starts with `staging/<account>/`, so a draft
+cannot reference another account's staged bytes.
+
+Lambda's synchronous payload is capped at ~6 MB, so `stage_media` is
+only for small media (images, short videos). For larger media, host it
+at your own https URL and pass the URL directly in `draft_post`.
+
+### Publishing cap
+
+Every IG publish is preceded by a check against the account's live
+`content_publishing_limit`. The server treats 50 posts in a rolling
+24-hour window as the safe assumption (Meta's docs list both 50 and
+100 in different sections) and warns on the draft when the remaining
+quota drops below 2. The warning is non-blocking; the publish still
+proceeds and Meta's own rate limit is the ultimate backstop.
+
+### Operator loop for IG
+
+```bash
+# Agent (any MCP client):
+#   stage_media(data_base64=..., mime_type='image/jpeg')  -> s3://... key
+#   draft_post(account='main-page-ig', kind='image',
+#              text='caption', media='s3://...')          -> draft_id
+
+# Operator reviews + approves the IG draft (manual publish_mode):
+python scripts/admin.py approve --env dev --draft-id <id>
+
+# Agent publishes (the Publisher presigns the bucket object, polls the
+# container flow, publishes, and drains the staged bytes):
+#   publish_draft(draft_id=<id>)  ->  post_id (ig_media_id) + permalink
+```
+

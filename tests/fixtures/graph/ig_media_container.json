@@ -1,0 +1,22 @@
+{
+  "status_IN_PROGRESS": {
+    "id": "17895000000000500",
+    "status_code": "IN_PROGRESS",
+    "status": "The media is being processed"
+  },
+  "status_FINISHED": {
+    "id": "17895000000000500",
+    "status_code": "FINISHED",
+    "status": "Finished"
+  },
+  "status_ERROR": {
+    "id": "17895000000000500",
+    "status_code": "ERROR",
+    "status": "The media failed to upload: unsupported file format"
+  },
+  "status_EXPIRED": {
+    "id": "17895000000000500",
+    "status_code": "EXPIRED",
+    "status": "Container expired after 24h unpublished"
+  }
+}

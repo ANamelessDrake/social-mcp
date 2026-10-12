@@ -58,9 +58,10 @@ def draft_post(
       (see `list_accounts` for the account's mode and the policy block).
     - `link`: only for `kind='link'`; must point at an allowed domain
       when the account's policy sets one.
-    - `media`: comma-separated https URLs for photo / multi_image /
-      video drafts. Facebook accepts a direct URL and Meta fetches it;
-      S3 staging for Instagram arrives in a later milestone.
+    - `media`: comma-separated media references for photo / multi_image /
+      video / reel drafts. Each ref is either an https URL (Facebook
+      fetches it; Instagram also accepts it) or an `s3://` key you got
+      back from `stage_media` for this same account.
     - `is_ai_generated`: 1 to tag the post for Meta's AI content flag
       (Instagram only; set once on carousels).
     - `scheduled_time`: ISO 8601 UTC. Pass this to pre-fill the schedule
@@ -103,6 +104,10 @@ def draft_post(
     media_refs = _parse_media(media)
     try:
         _basic_shape_check(kind_norm, text, link, media_refs)
+    except CapabilityError as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        _check_s3_namespacing(alias, media_refs)
     except CapabilityError as e:
         return {"ok": False, "error": str(e)}
     limit = provider.limits
@@ -263,6 +268,34 @@ def _basic_shape_check(kind: str, text: str, link: str, media_refs: list[MediaRe
         raise CapabilityError(f"{kind} kind requires at least one media URL in 'media'")
     if kind == "multi_image" and len(media_refs) < 2:
         raise CapabilityError("multi_image requires two or more media URLs in 'media'")
+
+
+def _check_s3_namespacing(alias: str, media_refs: list[MediaRef]) -> None:
+    """Reject an s3 ref whose key is not under this account's staging prefix.
+
+    `stage_media` writes keys as `s3://<bucket>/staging/<alias>/<ulid>/...`;
+    we parse the ref and check the alias segment matches the draft's
+    account, so one account cannot reference another's staged bytes
+    (DESIGN.md section 9).
+    """
+    expected = f"/staging/{alias}/"
+    for ref in media_refs:
+        if ref.source != "s3":
+            continue
+        key = ref.key or ""
+        if not key.startswith("s3://"):
+            raise CapabilityError(f"s3 media ref must start with s3://: got {key!r}")
+        # drop scheme + bucket; what remains starts with the path
+        without_scheme = key[len("s3://"):]
+        _, slash, path = without_scheme.partition("/")
+        if not slash or not path:
+            raise CapabilityError(f"malformed s3 media ref: {key!r}")
+        if f"/{path}".find(expected) != 0:
+            raise CapabilityError(
+                f"s3 media ref {key!r} is not under this account's staging "
+                f"prefix ({expected}); call stage_media against account "
+                f"'{alias}' and reuse the returned key"
+            )
 
 
 def _new_draft_id() -> str:

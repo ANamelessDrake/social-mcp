@@ -23,6 +23,7 @@ from . import (
     publish_draft,
     reply_to_comment,
     schedule_draft,
+    stage_media,
     update_draft,
 )
 
@@ -47,3 +48,5 @@ def register_all(mcp: FastMCP) -> None:
     mcp.tool()(delete_post.delete_post)
     mcp.tool()(reply_to_comment.reply_to_comment)
     mcp.tool()(hide_comment.hide_comment)
+    # media staging + instagram publishing (M5)
+    mcp.tool()(stage_media.stage_media)

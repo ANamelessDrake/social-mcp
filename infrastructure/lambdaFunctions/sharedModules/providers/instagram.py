@@ -7,16 +7,18 @@ and section 3.3 for the connect flow that stores both the Page and IG
 account items.
 
 M4 covers the read half: list_posts, get_post, list_comments, get_insights.
-Publishing (M5) stays NotImplementedError here; the container flow and S3
-staging land with the s3Stack in that milestone.
+M5 lands publishing (container flow + S3 media staging), delete, and the
+`content_publishing_limit` precheck.
 """
 
 import logging
+import time
 
 from sharedModules import crypto, dynamo, registry
 from sharedModules.errors import AccountError, CapabilityError
 from sharedModules.models import Comment, Insights, Post, PostSummary, PublishResult
 
+from . import mediaStaging
 from .base import Capability, ProviderLimits
 from .metaClient import GraphClient
 
@@ -59,13 +61,30 @@ BANNED_METRICS = frozenset(
 
 # IG media_type -> unified kind. REELS and VIDEO are distinct here because
 # `get_insights` picks a slightly different metric set for each, and
-# `publish` (M5) will have different container flows.
+# `publish` has different container flows for the two.
 _KIND_BY_MEDIA_TYPE = {
     "IMAGE": "image",
     "VIDEO": "video",
     "CAROUSEL_ALBUM": "multi_image",
     "REELS": "reel",
 }
+
+# Container-flow polling schedule: 1s, 2s, 4s, 8s, ..., 60s capped,
+# 600 seconds total. Status transitions are typically seconds for images,
+# tens of seconds for video; reel can take longer when Meta transcodes.
+_POLL_INITIAL_SECONDS = 1.0
+_POLL_MAX_SECONDS = 60.0
+_POLL_TOTAL_SECONDS = 600.0
+
+# `content_publishing_limit` is cached in memory per account for one minute
+# so a batch publish does not hit the limit endpoint on every call.
+_LIMIT_CACHE_TTL = 60.0
+_limit_cache: dict[str, tuple[float, dict]] = {}
+
+# Safe assumption when the live quota is ambiguous (DESIGN.md section 5).
+# Meta's docs list 50 and 100 in different sections of the same page.
+_SAFE_DAILY_CAP = 50
+_LOW_QUOTA_WARN = 2  # warn when remaining quota drops below this
 
 
 class InstagramProvider:
@@ -177,7 +196,116 @@ class InstagramProvider:
     # ---------- write ops (M5) ----------
 
     def publish(self, draft) -> PublishResult:
-        raise NotImplementedError("instagram publishing lands in M5")
+        """Container-flow publish (DESIGN.md section 5, Instagram).
+
+        1. Build one media container per media item (carousel = N child
+           containers plus one parent).
+        2. Poll `GET /{container_id}?fields=status_code,status` until
+           FINISHED or until the schedule is exhausted.
+        3. `POST /{ig_user_id}/media_publish` with the creation id.
+
+        Media URLs come from the draft's `media` list, which the tool
+        layer has already restricted to `s3://` references (presigned
+        here) or https URLs (passed through). The Publisher drains S3
+        bytes on success; on failure the bucket's 24-hour lifecycle rule
+        is the backstop.
+        """
+        registry.require_scope(self.alias, "instagram_content_publish")
+        record = registry.account_record(self.alias)
+        ig_user_id = record["account_id"]
+        if not ig_user_id:
+            raise AccountError(
+                f"account '{self.alias}' is not connected; "
+                f"run `python scripts/admin.py connect --alias {self.alias}`"
+            )
+        kind = (getattr(draft, "kind", "") or "").lower()
+        caption = getattr(draft, "text", "") or ""
+        is_ai = bool(getattr(draft, "is_ai_generated", False))
+        urls = _media_urls_for_publish(draft)
+
+        if kind == "image":
+            if not urls:
+                raise AccountError("image draft has no media")
+            container_id = self._create_container(
+                ig_user_id,
+                {"image_url": urls[0], "caption": caption},
+                is_ai,
+            )
+        elif kind == "video":
+            if not urls:
+                raise AccountError("video draft has no media")
+            container_id = self._create_container(
+                ig_user_id,
+                {"video_url": urls[0], "media_type": "VIDEO", "caption": caption},
+                is_ai,
+            )
+        elif kind == "reel":
+            if not urls:
+                raise AccountError("reel draft has no media")
+            container_id = self._create_container(
+                ig_user_id,
+                {"video_url": urls[0], "media_type": "REELS", "caption": caption},
+                is_ai,
+            )
+        elif kind == "multi_image":
+            if len(urls) < 2:
+                raise AccountError("multi_image needs two or more media items")
+            if len(urls) > 10:
+                raise AccountError(
+                    f"instagram carousel caps at 10 items; got {len(urls)}"
+                )
+            child_ids: list[str] = []
+            for url in urls:
+                child = self._create_container(
+                    ig_user_id,
+                    {"image_url": url, "is_carousel_item": "true"},
+                    False,
+                )
+                self._poll_container(child)
+                child_ids.append(child)
+            container_id = self._create_container(
+                ig_user_id,
+                {
+                    "media_type": "CAROUSEL",
+                    "children": ",".join(child_ids),
+                    "caption": caption,
+                },
+                is_ai,
+            )
+        elif kind == "text":
+            raise CapabilityError(
+                "instagram does not support text-only posts; "
+                "add media or use a different account"
+            )
+        elif kind == "link":
+            raise CapabilityError(
+                "instagram does not render captions as link posts; "
+                "use a different account for link posts"
+            )
+        else:
+            raise CapabilityError(
+                f"kind '{kind}' is not supported on instagram; "
+                "use image, multi_image, video, or reel"
+            )
+
+        self._poll_container(container_id)
+        pub = self._client.post(
+            f"/{ig_user_id}/media_publish",
+            data={"creation_id": container_id},
+        )
+        new_id = str(pub.get("id") or "")
+        permalink = ""
+        try:
+            node = self._client.get(f"/{new_id}", params={"fields": "permalink"})
+            permalink = node.get("permalink", "") or ""
+        except AccountError as e:
+            log.info("instagram permalink lookup failed for %s: %s", new_id, e)
+        return PublishResult(
+            account=self.alias,
+            post_id=new_id,
+            permalink=permalink,
+            kind=kind,
+        )
 
     def edit(self, post_id: str, patch: dict) -> None:
         raise NotImplementedError("Instagram does not support post edits")
@@ -186,16 +314,127 @@ class InstagramProvider:
         raise NotImplementedError("Instagram does not support post edits")
 
     def delete(self, post_id: str) -> None:
-        raise NotImplementedError("Instagram delete lands in M5")
+        self.delete_post(post_id)
 
     def delete_post(self, post_id: str) -> None:
-        raise NotImplementedError("Instagram delete lands in M5")
+        """Delete an IG media node.
+
+        Meta added `instagram_manage_contents` as a required scope for
+        media delete on 2025-12-03. The admin CLI's `delete-contents`
+        tier adds it to the Facebook Login consent dialog.
+        """
+        registry.require_scope(self.alias, "instagram_manage_contents")
+        self._client.delete(f"/{post_id}")
 
     def reply_to_comment(self, comment_id: str, text: str) -> Comment:
-        raise NotImplementedError("Instagram comment replies land in M5")
+        """Post a reply under an IG comment and return the created one."""
+        registry.require_scope(self.alias, "instagram_manage_comments")
+        resp = self._client.post(f"/{comment_id}/replies", data={"message": text or ""})
+        new_id = str(resp.get("id") or "")
+        return Comment(
+            account=self.alias,
+            comment_id=new_id,
+            post_id="",
+            thread_id=comment_id,
+            created_time="",
+            author="",
+            text=text or "",
+            is_hidden=False,
+            reply_count=0,
+        )
 
     def hide_comment(self, comment_id: str) -> None:
-        raise NotImplementedError("Instagram comment hides land in M5")
+        """Hide (not delete) an IG comment; reversible from Meta's own UI."""
+        registry.require_scope(self.alias, "instagram_manage_comments")
+        self._client.post(f"/{comment_id}", data={"hide": "true"})
+
+    # ---------- publishing precheck + validation ----------
+
+    def publishing_limit(self) -> dict:
+        """Live content_publishing_limit, cached per account for 60s."""
+        registry.require_scope(self.alias, "instagram_content_publish")
+        now = time.monotonic()
+        cached = _limit_cache.get(self.alias)
+        if cached and (now - cached[0]) < _LIMIT_CACHE_TTL:
+            return cached[1]
+        record = registry.account_record(self.alias)
+        ig_user_id = record["account_id"] or "me"
+        data = self._client.get(
+            f"/{ig_user_id}/content_publishing_limit",
+            params={"fields": "quota_usage,config"},
+        )
+        row = (data.get("data") or [{}])[0]
+        usage = int(row.get("quota_usage") or 0)
+        config = row.get("config") or {}
+        quota_total = int(config.get("quota_total") or _SAFE_DAILY_CAP)
+        info = {
+            "quota_total": quota_total,
+            "quota_usage": usage,
+            "quota_remaining": max(0, quota_total - usage),
+            "config": config,
+        }
+        _limit_cache[self.alias] = (now, info)
+        return info
+
+    def validate_draft(self, draft) -> list[str]:
+        """Non-blocking warnings surfaced on draft_post (DESIGN.md 5)."""
+        warnings: list[str] = []
+        try:
+            limit = self.publishing_limit()
+        except (AccountError, CapabilityError) as e:
+            log.info("publishing_limit precheck skipped: %s", e)
+            return warnings
+        remaining = int(limit.get("quota_remaining") or 0)
+        if remaining <= _LOW_QUOTA_WARN:
+            warnings.append(
+                f"instagram publishing quota is low: {remaining} of "
+                f"{limit.get('quota_total')} remaining in this 24h window"
+            )
+        return warnings
+
+    # ---------- publish helpers ----------
+
+    def _create_container(self, ig_user_id: str, params: dict, is_ai: bool) -> str:
+        payload = {k: v for k, v in params.items() if v != "" and v is not None}
+        if is_ai:
+            payload["is_ai_generated"] = "true"
+        resp = self._client.post(f"/{ig_user_id}/media", data=payload)
+        container_id = str(resp.get("id") or "")
+        if not container_id:
+            raise AccountError("Meta returned no container id for the media creation")
+        return container_id
+
+    def _poll_container(self, container_id: str) -> None:
+        """Block until the container reaches FINISHED or raises on ERROR/EXPIRED.
+
+        Exponential schedule (1s, 2s, 4s, 8s, ..., capped at 60s between
+        polls, 600s total). The container flow is deliberately synchronous
+        inside the Publisher Lambda; a 10-minute cap is well within the
+        Publisher's own timeout and keeps the whole publish close enough
+        to realtime that a human waiting in the admin loop sees the result.
+        """
+        deadline = time.monotonic() + _POLL_TOTAL_SECONDS
+        delay = _POLL_INITIAL_SECONDS
+        while True:
+            data = self._client.get(
+                f"/{container_id}",
+                params={"fields": "status_code,status"},
+            )
+            status = (data.get("status_code") or "").upper()
+            if status == "FINISHED" or status == "PUBLISHED":
+                return
+            if status in ("ERROR", "EXPIRED"):
+                detail = data.get("status") or status
+                raise AccountError(
+                    f"instagram container '{container_id}' failed: {detail}"
+                )
+            if time.monotonic() + delay > deadline:
+                raise AccountError(
+                    f"instagram container '{container_id}' did not finish "
+                    f"within {int(_POLL_TOTAL_SECONDS)}s"
+                )
+            time.sleep(delay)
+            delay = min(delay * 2, _POLL_MAX_SECONDS)
 
     # ---------- token plumbing ----------
 
@@ -259,6 +498,36 @@ class InstagramProvider:
 
 
 # ---------- module-level pure helpers (unit-testable without HTTP) ----------
+
+
+def _media_urls_for_publish(draft) -> list[str]:
+    """Return a list of https URLs for Meta to fetch at publish time.
+
+    `s3://` references are presigned to 15-minute GET URLs; `https://`
+    references pass through unchanged. The staging prefix check (that
+    the key sits under `staging/<account>/`) is enforced at draft_post
+    time; this helper trusts the ref and only converts the source.
+    """
+    out: list[str] = []
+    for m in getattr(draft, "media", []) or []:
+        if hasattr(m, "source") and hasattr(m, "key"):
+            source = getattr(m, "source", "url") or "url"
+            key = getattr(m, "key", "") or ""
+        elif isinstance(m, dict):
+            source = m.get("source", "url") or "url"
+            key = m.get("key", "") or m.get("url", "") or ""
+        else:
+            source = "url"
+            key = str(m)
+        if source == "s3":
+            out.append(mediaStaging.presign_get(key))
+        elif source == "url" and key.startswith("https://"):
+            out.append(key)
+        else:
+            raise CapabilityError(
+                f"instagram media must be an https URL or an s3:// staged ref; got {key!r}"
+            )
+    return out
 
 
 def _metrics_for(media_type: str) -> list[str]:

@@ -13,6 +13,7 @@ sys.path.append(project_root)
 from infrastructure.stacks.dynamoDbStack import DynamoDbStack  # noqa: E402
 from infrastructure.stacks.lambdaFunctionStack import LambdaFunctionsStack  # noqa: E402
 from infrastructure.stacks.monitoringStack import MonitoringStack  # noqa: E402
+from infrastructure.stacks.s3Stack import S3Stack  # noqa: E402
 from infrastructure.stacks.schedulerStack import SchedulerStack  # noqa: E402
 from infrastructure.stacks.secretsStack import SecretsStack  # noqa: E402
 
@@ -50,16 +51,25 @@ dynamodb_stack = DynamoDbStack(
     env=env,
 )
 
+s3_stack = S3Stack(
+    app,
+    f"{env_project}-s3",
+    config=config,
+    env=env,
+)
+
 lambda_stack = LambdaFunctionsStack(
     app,
     f"{env_project}-lambda",
     config=config,
     secrets=secrets_stack,
     database=dynamodb_stack,
+    media=s3_stack,
     env=env,
 )
 lambda_stack.add_dependency(secrets_stack)
 lambda_stack.add_dependency(dynamodb_stack)
+lambda_stack.add_dependency(s3_stack)
 
 # The Scheduler stack creates a role whose policy names the Publisher ARN,
 # and the Lambda stack adds a policy to the MCP role naming the schedule

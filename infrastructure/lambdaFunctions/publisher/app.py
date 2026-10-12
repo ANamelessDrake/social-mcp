@@ -43,7 +43,7 @@ if LAMBDA_DIR not in sys.path:
 from sharedModules import approval as approval_mod  # noqa: E402
 from sharedModules import dynamo, policy, registry  # noqa: E402
 from sharedModules.errors import AccountError, CapabilityError  # noqa: E402
-from sharedModules.providers import get_provider  # noqa: E402
+from sharedModules.providers import get_provider, mediaStaging  # noqa: E402
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -113,6 +113,14 @@ def _handle_publish(event: dict, actor: str) -> dict:
             draft_id,
             {"status": "published", "post_id": post_id, "permalink": permalink},
         )
+
+        # 5. Drain S3-staged media on success. Failure case leaves bytes
+        # for the bucket's 24h lifecycle rule (DESIGN.md section 9) so
+        # the staged content remains available for debugging.
+        try:
+            mediaStaging.drain(draft.get("media", []) or [])
+        except Exception:  # noqa: BLE001 - best-effort, lifecycle backstops
+            log.exception("mediaStaging.drain best-effort failure")
 
         dynamo.append_audit(
             {

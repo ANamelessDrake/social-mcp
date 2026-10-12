@@ -34,6 +34,7 @@ class LambdaFunctionsStack(Stack):
         config: dict,
         secrets,
         database,
+        media=None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -108,6 +109,11 @@ class LambdaFunctionsStack(Stack):
             "ACCOUNTS": accounts_env,
             "PUBLISHING_ENABLED": str(config.get("publishing_enabled", False)).lower(),
         }
+        if media is not None:
+            # Instagram publishing needs a public URL for every media container;
+            # the Publisher presigns an object from this bucket and tears it
+            # down after FINISHED (DESIGN.md section 9).
+            shared_env["MEDIA_BUCKET"] = media.media_bucket.bucket_name
 
         self.publisher = _lambda.Function(
             self,
@@ -125,6 +131,11 @@ class LambdaFunctionsStack(Stack):
         secrets.meta_app.grant_read(self.publisher)
         database.core_table.grant_read_write_data(self.publisher)
         database.token_key.grant_encrypt_decrypt(self.publisher)
+        if media is not None:
+            # Publisher reads staged bytes to presign and deletes them after
+            # the container reaches FINISHED (DESIGN.md section 9).
+            media.media_bucket.grant_read(self.publisher)
+            media.media_bucket.grant_delete(self.publisher)
 
         self.mcp_function = _lambda.Function(
             self,
@@ -155,6 +166,12 @@ class LambdaFunctionsStack(Stack):
         secrets.meta_app.grant_read(self.mcp_function)
         database.core_table.grant_read_write_data(self.mcp_function)
         database.token_key.grant_encrypt_decrypt(self.mcp_function)
+        if media is not None:
+            # stage_media writes staged bytes under staging/<account>/<ulid>/;
+            # delete rights let a cross-account rejection in draft_post clean
+            # up its own object rather than leaving it for the lifecycle rule.
+            media.media_bucket.grant_write(self.mcp_function)
+            media.media_bucket.grant_delete(self.mcp_function)
 
         # MCP server invokes the Publisher synchronously for publish_draft
         self.publisher.grant_invoke(self.mcp_function)

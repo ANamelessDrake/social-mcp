@@ -31,7 +31,10 @@ M3_TOOLS = {
     "reply_to_comment",
     "hide_comment",
 }
-EXPECTED = M1_TOOLS | M2_TOOLS | M3_TOOLS
+M5_TOOLS = {
+    "stage_media",
+}
+EXPECTED = M1_TOOLS | M2_TOOLS | M3_TOOLS | M5_TOOLS
 
 
 @pytest.fixture
