@@ -206,9 +206,26 @@ Policy (banned characters, banned words, hashtag cap, link-domain
 allowlist) runs at draft time **and** at publish time in every mode;
 auto mode skips the human review, not the content integrity check.
 
-Edits, deletes, and comment replies always need operator approval,
-regardless of mode. See [`content-policy.md`](content-policy.md) for the
-per-account policy fields.
+Edits, replies, and hides against already-live content default to
+operator approval and can be opted into one-shot auto-approve via the
+per-account `auto_verbs` list (M10, DESIGN.md section 7.8). The
+eligible values are `edit`, `reply`, and `hide`; the MCP tool for each
+accepts a matching `auto_publish=1` parameter which records the
+implicit approval and fires the Publisher in one call. Example:
+
+```json
+{
+  "alias": "main-page",
+  "auto_verbs": ["edit", "reply", "hide"]
+}
+```
+
+**Deletes and profile edits are hardcoded manual** and cannot be opted
+into auto. `delete_post` with `auto_publish=1` returns a refusal
+regardless of what `auto_verbs` contains; `publish_profile_edit` must
+always be preceded by `admin.py approve-profile-edit`. See
+[`content-policy.md`](content-policy.md) for the per-account policy
+fields.
 
 ## 9. (Optional) Enable profile edits (M9)
 

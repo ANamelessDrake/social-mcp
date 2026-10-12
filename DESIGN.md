@@ -678,15 +678,15 @@ without changing any tool call.
 |---|---|---|---|
 | `publish_draft` | admin.py approve | implicit at `draft_post` | implicit if `kind` in `auto_for_kinds`, else manual |
 | `schedule_draft` | admin.py approve | implicit at `draft_post` | same as above |
-| `edit_post` | admin.py approve-edit | admin.py approve-edit | admin.py approve-edit |
-| `delete_post` | admin.py approve-delete | admin.py approve-delete | admin.py approve-delete |
-| `reply_to_comment` | admin.py approve-reply | admin.py approve-reply | admin.py approve-reply |
-| `hide_comment` | standing per-account approval | standing per-account approval | standing per-account approval |
+| `edit_post` | admin.py approve-edit (or `auto_verbs: ["edit"]` + `auto_publish=1`, section 7.8) | same | same |
+| `delete_post` | admin.py approve-delete (always) | same | same |
+| `reply_to_comment` | admin.py approve-reply (or `auto_verbs: ["reply"]` + `auto_publish=1`, section 7.8) | same | same |
+| `hide_comment` | standing per-account approval (or `auto_verbs: ["hide"]` + `auto_publish=1`, section 7.8) | same | same |
 
-Auto mode is deliberately scoped to the *write-new* verbs
-(`publish_draft`, `schedule_draft`). Edits, deletes, and replies touch
-posts that are already live and visible, which is a different risk
-profile; those stay operator-approved regardless of `publish_mode`.
+`publish_mode` is deliberately scoped to the *write-new* verbs
+(`publish_draft`, `schedule_draft`). Edits, replies, and hides against
+already-live content are governed independently by `auto_verbs`
+(section 7.8). Deletes and profile edits never auto-approve.
 
 **Convenience tool-side shortcut**: `draft_post(..., auto_publish=true)`
 is the single-call form of "draft and publish". The server runs it as
@@ -804,6 +804,58 @@ changes require Meta's name-change review workflow, not a Graph POST,
 so the field is preserved on the ProfilePatch shape (for Bluesky) and
 ignored by `FacebookProvider.update_profile`. Avatar and cover image
 uploads are deferred.
+
+### 7.8 Per-verb auto-approval (M10)
+
+`publish_mode` governs the write-new verbs; the live-content verbs
+`edit_post`, `reply_to_comment`, and `hide_comment` each default to
+operator approval. For deployments where the agent is trusted to run a
+particular live-content verb without a human in the loop, an account's
+`auto_verbs` list opts that verb into one-shot auto-approve:
+
+```json
+{
+  "accounts": [
+    {
+      "alias": "main-page",
+      "publish_mode": "auto",
+      "auto_verbs": ["edit", "reply", "hide"]
+    }
+  ]
+}
+```
+
+Allowed values: `edit`, `reply`, `hide`. **Deletes and profile edits
+are never eligible**, by design: delete erases public content and
+profile edits change brand identity, both of which demand a human eye
+regardless of trust posture.
+
+Semantics on the tool side: each of `edit_post`, `reply_to_comment`,
+`hide_comment` takes an `auto_publish: int = 0` parameter. When set to
+1 and the matching verb is listed in `auto_verbs`, the tool records the
+implicit approval (same hash shape operator approval uses, so the
+Publisher's hash check is unchanged), fires the Publisher
+synchronously, and returns the Publisher's envelope. When set to 1 but
+the verb is not in `auto_verbs`, the tool refuses with a specific error
+naming the account and the fix, without staging or approving. When set
+to 0 (default), behavior is identical to pre-M10: stage and ask the
+operator to approve. Policy still runs at both stage and publish time
+in every path; `auto_verbs` skips only the human step, not the content
+integrity check.
+
+`delete_post` also accepts the `auto_publish` parameter for API
+uniformity across the live-content verbs, but passing 1 returns a
+design-level refusal regardless of config. `publish_profile_edit`
+has no `auto_publish` parameter at all; it must always be preceded by
+`admin.py approve-profile-edit`.
+
+`hide_comment` carries a slight twist because its approval is standing
+per account rather than per-item: when `auto_verbs` includes `hide` and
+`auto_publish=1` and no standing approval exists, the tool writes the
+standing approval server-side before firing the hide. Subsequent hides
+on that account continue to reuse the standing approval exactly as they
+do under manual flow. `admin.py approve-hide --account <alias>` is
+still the way to grant standing approval by hand.
 
 ## 8. MCP tool surface
 

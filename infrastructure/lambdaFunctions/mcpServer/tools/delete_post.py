@@ -16,7 +16,12 @@ from sharedModules.providers import get_provider
 from sharedModules.providers.base import Capability
 
 
-def delete_post(post_id: str, reason: str = "", account: str = "") -> dict:
+def delete_post(
+    post_id: str,
+    reason: str = "",
+    account: str = "",
+    auto_publish: int = 0,
+) -> dict:
     """Stage a delete of a Page post for operator approval.
 
     - `post_id` (required): the post's Meta-native id.
@@ -24,6 +29,10 @@ def delete_post(post_id: str, reason: str = "", account: str = "") -> dict:
       report escalated", "wrong link"). Optional.
     - `account`: alias from `list_accounts`. Omit when only one is
       configured.
+    - `auto_publish`: deletes are never auto-published; passing 1
+      returns a specific refusal without staging. This is by design
+      (M10): deletes erase public content and always require an
+      explicit operator approval via admin.py.
 
     Returns `{ok, post_id, staged_change, next}`. The next step is
     `python scripts/admin.py approve-delete --post-id <id>`; nothing
@@ -36,6 +45,17 @@ def delete_post(post_id: str, reason: str = "", account: str = "") -> dict:
 
     if not post_id:
         return {"ok": False, "error": "post_id is required"}
+
+    if bool(int(auto_publish or 0)):
+        return {
+            "ok": False,
+            "error": (
+                "delete is never auto-published; the operator must run "
+                f"`python scripts/admin.py approve-delete --post-id {post_id}`. "
+                "This is a design-level guarantee (M10) and cannot be overridden "
+                "via auto_verbs."
+            ),
+        }
 
     provider = get_provider(alias)
     if Capability.DELETE not in provider.capabilities:
