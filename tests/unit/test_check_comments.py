@@ -1,7 +1,43 @@
 """check_comments: pull-based inbox drain with per-filter cursors."""
 
+import json
+
 import boto3
-from sharedModules import dynamo
+import pytest
+from sharedModules import dynamo, registry, scope
+
+
+@pytest.fixture
+def two_accounts(monkeypatch):
+    """Register both aliases on this test's roster. The default conftest
+    only registers main-page; tests that exercise multi-account sweeps need
+    both visible."""
+    monkeypatch.setenv(
+        "ACCOUNTS",
+        json.dumps(
+            [
+                {
+                    "alias": "main-page",
+                    "provider": "facebook",
+                    "publish_enabled": False,
+                    "publish_mode": "manual",
+                    "auto_for_kinds": [],
+                    "policy": {},
+                },
+                {
+                    "alias": "news-ig",
+                    "provider": "instagram",
+                    "publish_enabled": False,
+                    "publish_mode": "manual",
+                    "auto_for_kinds": [],
+                    "policy": {},
+                },
+            ]
+        ),
+    )
+    registry.all_accounts.cache_clear()
+    yield
+    registry.all_accounts.cache_clear()
 
 
 def _write_event(table, alias: str, created_time: str, comment_id: str, post_id: str = "P"):
@@ -54,7 +90,7 @@ def test_post_id_filter_keeps_its_own_cursor(aws):
     assert sorted(c["comment_id"] for c in unfiltered["comments"]) == ["1", "2"]
 
 
-def test_empty_account_sweeps_known_aliases(aws):
+def test_empty_account_sweeps_known_aliases(aws, two_accounts):
     table = boto3.resource("dynamodb").Table("test-socialmcp-core")
     _write_event(table, "main-page", "2026-10-01T00:00:00", "1")
     _write_event(table, "news-ig", "2026-10-01T00:01:00", "2")
@@ -74,3 +110,31 @@ def test_unknown_account_errors(aws):
     out = check_comments(account="missing")
     assert out["ok"] is False
     assert "missing" in out["error"]
+
+
+def test_empty_account_honors_pinned_scope(aws, two_accounts):
+    """A pinned agent sweeping with no account must not pull in accounts
+    outside its pin. DESIGN.md 4.2 calls this out as scope, not a security
+    boundary, but a pinned agent explicitly cannot talk itself into another
+    account by name OR by sweep."""
+    table = boto3.resource("dynamodb").Table("test-socialmcp-core")
+    _write_event(table, "main-page", "2026-10-01T00:00:00", "1")
+    _write_event(table, "news-ig", "2026-10-01T00:01:00", "2")
+
+    scope.set_scope(("main-page",))
+    from tools.check_comments import check_comments
+
+    out = check_comments()
+    assert [c["comment_id"] for c in out["comments"]] == ["1"]
+
+
+def test_named_account_outside_scope_errors(aws, two_accounts):
+    """Naming an out-of-scope account should fail with the same error as
+    an unknown alias, so a pinned agent cannot bypass the pin by hard-coding
+    an account name."""
+    scope.set_scope(("main-page",))
+    from tools.check_comments import check_comments
+
+    out = check_comments(account="news-ig")
+    assert out["ok"] is False
+    assert "news-ig" in out["error"]

@@ -1,6 +1,40 @@
 """wait_for_comments: subscribe-then-drain race, event unblock, timeout."""
 
+import json
+
 import boto3
+import pytest
+from sharedModules import registry, scope
+
+
+@pytest.fixture
+def two_accounts(monkeypatch):
+    monkeypatch.setenv(
+        "ACCOUNTS",
+        json.dumps(
+            [
+                {
+                    "alias": "main-page",
+                    "provider": "facebook",
+                    "publish_enabled": False,
+                    "publish_mode": "manual",
+                    "auto_for_kinds": [],
+                    "policy": {},
+                },
+                {
+                    "alias": "news-ig",
+                    "provider": "instagram",
+                    "publish_enabled": False,
+                    "publish_mode": "manual",
+                    "auto_for_kinds": [],
+                    "policy": {},
+                },
+            ]
+        ),
+    )
+    registry.all_accounts.cache_clear()
+    yield
+    registry.all_accounts.cache_clear()
 
 
 def _write_event(table, alias: str, created_time: str, comment_id: str, post_id: str = "P"):
@@ -112,8 +146,13 @@ def test_wildcard_subscribes_without_account(aws, monkeypatch):
     assert captured["channel"] == "social-mcp/comments/*"
 
 
-def test_wildcard_filter_rejects_mismatched_event(aws, monkeypatch):
-    on_wrong = {"account": "other", "comment_id": "7", "post_id": "P", "created_time": "t"}
+def test_wildcard_filter_rejects_mismatched_event(aws, monkeypatch, two_accounts):
+    on_wrong = {
+        "account": "news-ig",
+        "comment_id": "7",
+        "post_id": "P",
+        "created_time": "t",
+    }
     on_right = {
         "account": "main-page",
         "comment_id": "8",
@@ -129,3 +168,56 @@ def test_wildcard_filter_rejects_mismatched_event(aws, monkeypatch):
 
     out = wait_for_comments(timeout_seconds=5, account="main-page")
     assert out["comments"][0]["comment_id"] == "8"
+
+
+def test_pinned_scope_narrows_the_subscribed_channel(aws, monkeypatch, two_accounts):
+    """A connection pinned to one account must subscribe to that account's
+    wildcard channel, not the top-level wildcard, so the server never
+    delivers events the caller is not pinned to see."""
+    captured = {}
+
+    def factory(channel):
+        captured["channel"] = channel
+        return _FakeSub(events=[])
+
+    monkeypatch.setattr("tools.wait_for_comments.EventSubscription", factory)
+    scope.set_scope(("main-page",))
+
+    from tools.wait_for_comments import wait_for_comments
+
+    wait_for_comments(timeout_seconds=5)
+    assert captured["channel"] == "social-mcp/comments/main-page/*"
+
+
+def test_pinned_scope_filters_wildcard_events(aws, monkeypatch, two_accounts):
+    """When the subscription channel is a wildcard (unpinned, or pinned to
+    multiple accounts), events for accounts outside the pin must not reach
+    the caller even if AppSync delivers them."""
+    out_of_scope = {
+        "account": "news-ig",
+        "comment_id": "99",
+        "post_id": "P",
+        "created_time": "t",
+    }
+    fake = _FakeSub(events=[out_of_scope])
+    monkeypatch.setattr(
+        "tools.wait_for_comments.EventSubscription", lambda channel: fake
+    )
+    scope.set_scope(("main-page",))
+
+    from tools.wait_for_comments import wait_for_comments
+
+    # Even if the server delivered an out-of-scope event, the tool drops
+    # it; the only outcome visible to the caller is the timeout.
+    out = wait_for_comments(timeout_seconds=5)
+    assert out["timed_out"] is True
+    assert out["comments"] == []
+
+
+def test_pinned_scope_rejects_named_out_of_scope_account(aws, two_accounts):
+    scope.set_scope(("main-page",))
+    from tools.wait_for_comments import wait_for_comments
+
+    out = wait_for_comments(timeout_seconds=5, account="news-ig")
+    assert out["ok"] is False
+    assert "news-ig" in out["error"]

@@ -10,7 +10,8 @@ subscription, so a missed stream wake still lands on the next check.
 
 import time
 
-from sharedModules import dynamo
+from sharedModules import dynamo, registry, scope
+from sharedModules.errors import AccountError
 from sharedModules.events import EventSubscription
 
 from .check_comments import _identity_from_scope, check_comments
@@ -26,22 +27,42 @@ def wait_for_comments(
     """Block until a new comment arrives on your posts or `timeout_seconds` elapse.
 
     Leave `account` and `post_id` empty to wake on any comment on any
-    configured account. Pass `account` to narrow to one Page or IG
-    account; pass `post_id` to narrow further to one post. Returns as
-    soon as one matching comment is available. `timeout_seconds` is
-    clamped to [5, 840]. When the timeout fires with no new comment, the
-    return is {"ok": true, "comments": [], "timed_out": true}.
+    account visible to your connection (narrowed to the scope your
+    connection is pinned to, if any). Pass `account` to narrow to one
+    Page or IG account; pass `post_id` to narrow further to one post.
+    Returns as soon as one matching comment is available.
+    `timeout_seconds` is clamped to [5, 840]. When the timeout fires with
+    no new comment, the return is {"ok": true, "comments": [],
+    "timed_out": true}.
     """
     timeout = max(5, min(int(timeout_seconds), MAX_WAIT_SECONDS))
     deadline = time.monotonic() + timeout
 
+    # Resolve the per-connection account scope before building the
+    # channel. A pinned caller must not be able to subscribe to a
+    # wildcard that spans accounts it is not pinned to; and if they name
+    # an out-of-scope account explicitly, reject it here with the same
+    # error the registry would raise for an unknown alias.
+    try:
+        if account:
+            registry.resolve_alias(account)
+        permitted = set(registry.configured_accounts().keys())
+    except AccountError as e:
+        return {"ok": False, "error": str(e)}
+
     # One subscription per call. For a single-account single-post wait
-    # we subscribe to the exact channel; otherwise an account wildcard
-    # or the top-level comments wildcard.
+    # we subscribe to the exact channel. Otherwise, if the connection is
+    # pinned to a single account, use the account wildcard. If the
+    # connection is pinned to several accounts, use the top-level
+    # wildcard and filter at receive time, since AppSync Events channels
+    # are a single string.
+    pinned = scope.allowed_accounts()
     if account and post_id:
         channel = f"social-mcp/comments/{account}/{post_id}"
     elif account:
         channel = f"social-mcp/comments/{account}/*"
+    elif pinned and len(pinned) == 1:
+        channel = f"social-mcp/comments/{pinned[0]}/*"
     else:
         channel = "social-mcp/comments/*"
 
@@ -62,17 +83,21 @@ def wait_for_comments(
             event = subscription.next_event(deadline)
             if event is None:
                 return {"ok": True, "comments": [], "timed_out": True}
-            # Advance the matching cursor so a later check does not
-            # re-report this one.
             alias = event.get("account", "")
             event_post_id = event.get("post_id", "")
+            # Filter against the per-connection scope BEFORE advancing a
+            # cursor: a wildcard subscription on an unpinned connection
+            # can legitimately deliver any account, but a pinned
+            # connection must not advance a cursor on an account outside
+            # its scope.
+            if alias not in permitted:
+                continue
             if alias:
-                scope = dynamo.comment_cursor_scope(alias, post_id)
+                cursor_scope = dynamo.comment_cursor_scope(alias, post_id)
                 sk = _sk_from_event(event)
                 if sk:
-                    dynamo.set_comment_cursor(identity, scope, sk)
-            # Apply the account/post filter in case the wildcard
-            # subscription delivered an unrelated event.
+                    dynamo.set_comment_cursor(identity, cursor_scope, sk)
+            # Apply the caller's filters.
             if account and alias != account:
                 continue
             if post_id and event_post_id != post_id:
