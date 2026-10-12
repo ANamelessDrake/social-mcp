@@ -19,6 +19,14 @@ class StubProvider:
         {
             # Narrow this to what the platform actually supports.
             Capability.TEXT,
+            # Declare PROFILE_READ when the provider can read the account's
+            # profile metadata (handle, display name, bio, avatar). Declare
+            # PROFILE_EDIT only when it can also apply partial updates via
+            # a server-side API; omit it when the platform's profile edits
+            # are human-only (e.g. Instagram): the tool layer refuses
+            # cleanly in that case.
+            # Capability.PROFILE_READ,
+            # Capability.PROFILE_EDIT,
         }
     )
     limits = ProviderLimits(max_text_length=0, max_media_per_post=0)
@@ -58,3 +66,12 @@ class StubProvider:
 
     def hide_comment(self, comment_id: str):
         raise NotImplementedError
+
+    # ----- profile (M9) -----
+    # Implement when the capability is declared above. ProfileInfo is the
+    # unified read shape; ProfilePatch is the write shape (only non-empty
+    # fields are applied).
+    # def get_profile(self):
+    #     raise NotImplementedError
+    # def update_profile(self, patch):
+    #     raise NotImplementedError

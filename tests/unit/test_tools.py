@@ -38,7 +38,12 @@ M7_TOOLS = {
     "check_comments",
     "wait_for_comments",
 }
-EXPECTED = M1_TOOLS | M2_TOOLS | M3_TOOLS | M5_TOOLS | M7_TOOLS
+M9_TOOLS = {
+    "get_profile",
+    "draft_profile_edit",
+    "publish_profile_edit",
+}
+EXPECTED = M1_TOOLS | M2_TOOLS | M3_TOOLS | M5_TOOLS | M7_TOOLS | M9_TOOLS
 
 
 @pytest.fixture

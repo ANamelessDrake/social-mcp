@@ -411,6 +411,8 @@ class Capability(StrEnum):
     DELETE = "delete"
     COMMENTS = "comments"
     INSIGHTS = "insights"
+    PROFILE_READ = "profile_read"   # M9
+    PROFILE_EDIT = "profile_edit"   # M9
 
 class Provider(Protocol):
     name: str
@@ -769,6 +771,40 @@ disable publishing outright, regardless of mode.
   the agent can still gather posts, read insights, and prepare drafts
   for when publishing is turned back on.
 
+### 7.7 Profile edits
+
+Profile edits (display name, bio, website, phone, emails on Facebook;
+displayName and description on Bluesky) go through the same stage ->
+approve -> Publisher flow as post edits, with three differences:
+
+- One staged change per account at a time, keyed as
+  `PROFILE_EDIT#<alias>`. The approval record sits under
+  `APPROVAL#profile:<alias>` and binds to a canonical patch (only
+  truthy writable fields; emails sorted). A re-stage with different
+  values invalidates any pending approval.
+- Enabled per-account by a new `profile_edits_enabled` flag in config.
+  When false, `draft_profile_edit` refuses before writing anything;
+  the default is false so a fresh deployment cannot modify a Page's
+  shopfront by accident.
+- Policy re-runs at publish time against the patch (banned_characters,
+  banned_words on `display_name` / `about` / `description`;
+  `allowed_link_domains` on `website`). The approval cannot cover a
+  policy change made after the operator approved.
+
+Capability matrix for v1:
+
+| Provider | PROFILE_READ | PROFILE_EDIT | Required scope |
+|---|---|---|---|
+| Facebook | yes | yes | `pages_manage_metadata` for write |
+| Instagram | yes | no (Graph API unsupported; raises CapabilityError) | `instagram_basic` for read |
+| Bluesky | yes | yes | app password already covers it |
+
+Facebook `display_name` is deliberately dropped on write: Page name
+changes require Meta's name-change review workflow, not a Graph POST,
+so the field is preserved on the ProfilePatch shape (for Bluesky) and
+ignored by `FacebookProvider.update_profile`. Avatar and cover image
+uploads are deferred.
+
 ## 8. MCP tool surface
 
 Designed to the weakest caller (8B local models): few tools, flat
@@ -795,6 +831,9 @@ pattern slack-mcp uses for `channel`).
 | `reply_to_comment` | `comment_id`, `text`, `account?` | Requires per-comment approval; audit-logged |
 | `hide_comment` | `comment_id`, `account?` | Requires per-account hide approval (reversible from admin CLI) |
 | `get_insights` | `post_id`, `account?` | Post-level metrics mapped to the unified set, see below |
+| `get_profile` | `account?` | Profile snapshot: handle, display name, about, description, website, phone, emails, picture/cover URLs, category, provider counters under `extras`. Requires `Capability.PROFILE_READ` |
+| `draft_profile_edit` | `account?`, `display_name?`, `about?`, `description?`, `website?`, `phone?`, `emails?` | Stage a partial profile update. Only non-empty fields enter the patch. Requires `profile_edits_enabled` on the account, plus `Capability.PROFILE_EDIT` on the provider. Policy runs on text fields and `website`. Approval shape: `profile:<alias>` |
+| `publish_profile_edit` | `account?` | Apply the approved patch via the Publisher Lambda. Re-checks the approval hash + policy before and after invocation |
 
 ### Unified insights
 
@@ -882,12 +921,24 @@ Full draft dataclass (section 6). `GSI1PK = DRAFTS#<account>` and
 | `content_hash` | sha256 of the canonical draft (section 7.2) |
 | `approved_by` | operator identity (OS user from the admin CLI) |
 | `approved_at` | ISO 8601 |
-| `scope` | `publish` / `schedule` / `edit:<post_id>` / `reply:<comment_id>` / `hide:<account>` |
+| `scope` | `publish` / `schedule` / `edit:<post_id>` / `reply:<comment_id>` / `hide:<account>` / `profile:<account>` |
+
+### `PROFILE_EDIT#<account>` (M9)
+
+| Attribute | Notes |
+|---|---|
+| `PK` | `PROFILE_EDIT#<account>` |
+| `patch` | Map of operator-approved writable fields; the Publisher reads this |
+| `created_by` | Agent identity on draft; operator identity on re-stage |
+| `created_at` | ISO 8601 |
+
+One row per account; a re-stage overwrites it. Deleted when the
+Publisher applies the edit or when `reject --kind profile-edit` runs.
 
 ### `AUDIT#<account>` with `SK = TS#<iso8601>`
 
 Append-only. Columns: `kind` (`draft`, `approve`, `reject`, `publish`,
-`schedule`, `edit`, `delete`, `reply`, `hide`), `actor_identity` (from
+`schedule`, `edit`, `delete`, `reply`, `hide`, `profile_edit`), `actor_identity` (from
 the bearer token's agent name on tool paths; the operator's OS user on
 admin CLI paths), `draft_id` / `post_id` / `comment_id` as applicable,
 `result` (`ok`, `error:<meta_code>`), `request_ms`. **No tokens, no raw

@@ -210,7 +210,44 @@ Edits, deletes, and comment replies always need operator approval,
 regardless of mode. See [`content-policy.md`](content-policy.md) for the
 per-account policy fields.
 
-## 9. First smoke test
+## 9. (Optional) Enable profile edits (M9)
+
+Profile management is off per-account by default so a fresh deployment
+cannot change a Page's About line, website, or Bluesky bio without an
+explicit opt-in and an operator approval on every change.
+
+To turn it on for one account:
+
+1. Edit `config/<env>.json` and add `profile_edits_enabled: true` on
+   that account's entry.
+2. If this is a Facebook Page, re-consent with the `profile` scope
+   tier so the Page token carries `pages_manage_metadata`:
+   ```bash
+   python scripts/admin.py connect --env <env> --alias <alias> --scopes profile
+   ```
+   Instagram profile reads need `instagram_basic`, which the Pages
+   consent dialog already covers; IG profile edits are not supported
+   via the Graph API (the tool refuses with a specific error).
+   Bluesky needs no extra consent; the app password already covers
+   the profile record.
+3. Redeploy so `profile_edits_enabled` lands in the Lambda env.
+
+Operator loop:
+
+- `draft_profile_edit(...)` (MCP tool) stages the patch; policy runs
+  on `display_name`, `about`, `description`, and `website`.
+- `python scripts/admin.py approve-profile-edit --env <env> --alias <alias>`
+  prints the staged patch, asks for confirmation, writes the approval,
+  and fires the Publisher.
+- Reject with `python scripts/admin.py reject --env <env> --kind profile-edit --account <alias>`;
+  the audit row records the rejection.
+
+`publish_mode: auto` does not auto-approve profile edits by default,
+even on an auto account. To let one account auto-apply profile edits,
+set `publish_mode: auto_for` and add `profile_edit` to
+`auto_for_kinds`.
+
+## 10. First smoke test
 
 With one account connected and publishing still off, ask your MCP client
 to do something read-only:

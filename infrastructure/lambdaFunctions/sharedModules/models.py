@@ -158,3 +158,42 @@ class PublishResult:
     post_id: str
     permalink: str = ""
     kind: str = ""
+
+
+# ---------- M9 profile shapes ----------
+#
+# Provider.get_profile returns ProfileInfo, a read-only snapshot of the
+# account's public-facing profile metadata (name, bio, website, picture).
+# ProfilePatch is the write side: only fields with non-empty values are
+# sent to the provider, so the operator can approve a partial change and
+# the Publisher applies exactly those keys.
+
+
+@dataclass
+class ProfileInfo:
+    """Account profile snapshot (DESIGN.md section 7.7)."""
+
+    account: str
+    handle: str = ""  # Page username, IG username, or Bluesky handle
+    display_name: str = ""
+    about: str = ""
+    description: str = ""
+    website: str = ""
+    phone: str = ""
+    emails: list[str] = field(default_factory=list)
+    picture_url: str = ""
+    cover_url: str = ""
+    category: str = ""
+    extras: dict = field(default_factory=dict)
+
+
+@dataclass
+class ProfilePatch:
+    """Writable subset of a profile; only non-empty fields are applied."""
+
+    display_name: str = ""
+    about: str = ""
+    description: str = ""
+    website: str = ""
+    phone: str = ""
+    emails: list[str] = field(default_factory=list)

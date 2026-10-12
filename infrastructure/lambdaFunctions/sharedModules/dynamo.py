@@ -11,7 +11,8 @@ section 10 + 7):
   `reply:<comment_id>`, or `hide:<account>` for the standing per-account
   hide approval.
 - `EDIT#<post_id>`, `DELETE#<post_id>`, `REPLY#<comment_id>`,
-  `HIDE_REQUEST#<account>`#`<comment_id>`, SK=`META` -> staged changes
+  `HIDE_REQUEST#<account>`#`<comment_id>`,
+  `PROFILE_EDIT#<account>` (M9), SK=`META` -> staged changes
   the MCP server writes; the Publisher reads these and the matching
   approval record, so the operator-approved payload is what reaches
   Meta, not whatever the agent re-sent after approval.
@@ -356,14 +357,45 @@ def list_hide_requests(account: str) -> list[dict]:
         KeyConditionExpression="PK = :pk",
         ExpressionAttributeValues={":pk": f"HIDE_REQUEST#{account}"},
     )
-    return [
-        {k: v for k, v in item.items() if k not in {"PK"}}
-        for item in resp.get("Items", [])
-    ]
+    return [{k: v for k, v in item.items() if k not in {"PK"}} for item in resp.get("Items", [])]
 
 
 def delete_hide_request(account: str, comment_id: str) -> None:
     core_table().delete_item(Key={"PK": f"HIDE_REQUEST#{account}", "SK": comment_id})
+
+
+# -------------------- M9 staged profile edit --------------------
+#
+# PROFILE_EDIT#<alias> items hold the operator-approved profile patch;
+# the Publisher reads this at publish time so the applied edit is what
+# was approved, not what the agent re-sent.
+
+
+def write_staged_profile_edit(account: str, patch: dict, created_by: str) -> dict:
+    """Write (or overwrite) a staged profile edit for one account."""
+    row = {k: v for k, v in (patch or {}).items() if v not in ("", None, [])}
+    item = {
+        "PK": f"PROFILE_EDIT#{account}",
+        "SK": "META",
+        "account": account,
+        "patch": row,
+        "created_by": created_by,
+        "created_at": _now(),
+    }
+    core_table().put_item(Item=item)
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def read_staged_profile_edit(account: str) -> dict | None:
+    resp = core_table().get_item(Key={"PK": f"PROFILE_EDIT#{account}", "SK": "META"})
+    item = resp.get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def delete_staged_profile_edit(account: str) -> None:
+    core_table().delete_item(Key={"PK": f"PROFILE_EDIT#{account}", "SK": "META"})
 
 
 def write_hide_standing(account: str, approved_by: str) -> None:
@@ -432,12 +464,10 @@ def list_audit(account: str = "", since: str = "", limit: int = 50) -> list[dict
             ExpressionAttributeValues={":p": "AUDIT#"},
             Limit=limit * 4,
         )
-        rows = sorted(
-            resp.get("Items", []), key=lambda r: r.get("created_at", ""), reverse=True
-        )[:limit]
-    return [
-        {k: v for k, v in row.items() if k not in {"PK", "SK"}} for row in rows
-    ]
+        rows = sorted(resp.get("Items", []), key=lambda r: r.get("created_at", ""), reverse=True)[
+            :limit
+        ]
+    return [{k: v for k, v in row.items() if k not in {"PK", "SK"}} for row in rows]
 
 
 # -------------------- global kill switch (DESIGN.md section 7.6) --------------------
@@ -544,9 +574,7 @@ def update_connect_state(
     try:
         core_table().update_item(
             Key={"PK": f"CONNECT_STATE#{state}", "SK": "META"},
-            UpdateExpression=(
-                "SET #s = :s, message = :m, aliases = :a, completed_at = :now"
-            ),
+            UpdateExpression=("SET #s = :s, message = :m, aliases = :a, completed_at = :now"),
             ConditionExpression="#s = :pending",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues=expr_values,
@@ -586,8 +614,7 @@ def comments_after(
         kwargs["ExpressionAttributeValues"][":sk"] = after_sk
     resp = core_table().query(**kwargs)
     rows = [
-        {k: v for k, v in item.items() if k not in {"PK", "SK"}}
-        | {"_sk": item["SK"]}
+        {k: v for k, v in item.items() if k not in {"PK", "SK"}} | {"_sk": item["SK"]}
         for item in resp.get("Items", [])
     ]
     if post_id:
@@ -615,9 +642,7 @@ def list_comment_accounts() -> list[str]:
 
 
 def get_comment_cursor(identity: str, scope: str) -> str:
-    resp = core_table().get_item(
-        Key={"PK": f"CURSOR#{identity}", "SK": f"COMMENT#{scope}"}
-    )
+    resp = core_table().get_item(Key={"PK": f"CURSOR#{identity}", "SK": f"COMMENT#{scope}"})
     item = resp.get("Item")
     if item is None:
         return ""

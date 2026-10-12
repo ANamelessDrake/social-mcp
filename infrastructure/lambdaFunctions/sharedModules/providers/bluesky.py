@@ -20,7 +20,15 @@ from datetime import UTC, datetime
 
 from sharedModules import crypto, dynamo, registry
 from sharedModules.errors import AccountError, CapabilityError
-from sharedModules.models import Comment, Insights, Post, PostSummary, PublishResult
+from sharedModules.models import (
+    Comment,
+    Insights,
+    Post,
+    PostSummary,
+    ProfileInfo,
+    ProfilePatch,
+    PublishResult,
+)
 
 from .base import Capability, ProviderLimits
 from .blueskyClient import BlueskyClient
@@ -52,6 +60,10 @@ class BlueskyProvider:
             Capability.DELETE,
             Capability.COMMENTS,
             Capability.INSIGHTS,
+            # Profile is a mutable `app.bsky.actor.profile` record on the
+            # user's own repo; both read and write are a single XRPC call.
+            Capability.PROFILE_READ,
+            Capability.PROFILE_EDIT,
             # Not declared:
             # - VIDEO: new and quirky, deferred
             # - REEL: not a concept on Bluesky
@@ -141,7 +153,7 @@ class BlueskyProvider:
             "app.bsky.feed.getPostThread",
             params={"uri": post_id, "depth": 6},  # a sane cap; most Bluesky threads are shallow
         )
-        root = (data.get("thread") or {})
+        root = data.get("thread") or {}
         out: list[Comment] = []
         cap = max(1, min(limit, 200))
 
@@ -234,8 +246,7 @@ class BlueskyProvider:
             }
         else:
             raise CapabilityError(
-                f"kind '{kind}' is not supported on bluesky; "
-                "use text, link, image, or multi_image"
+                f"kind '{kind}' is not supported on bluesky; use text, link, image, or multi_image"
             )
 
         resp = self._client.post(
@@ -257,14 +268,10 @@ class BlueskyProvider:
         )
 
     def edit(self, post_id: str, patch: dict) -> None:
-        raise NotImplementedError(
-            "bluesky post records are immutable; delete and repost"
-        )
+        raise NotImplementedError("bluesky post records are immutable; delete and repost")
 
     def edit_post(self, post_id: str, text: str) -> None:
-        raise NotImplementedError(
-            "bluesky post records are immutable; delete and repost"
-        )
+        raise NotImplementedError("bluesky post records are immutable; delete and repost")
 
     def delete(self, post_id: str) -> None:
         self.delete_post(post_id)
@@ -337,6 +344,116 @@ class BlueskyProvider:
         raise NotImplementedError(
             "bluesky has no server-API comment hide; mute at the client is the user action"
         )
+
+    # ---------- profile ops (M9) ----------
+
+    PROFILE_COLLECTION = "app.bsky.actor.profile"
+    PROFILE_RKEY = "self"
+
+    def get_profile(self) -> ProfileInfo:
+        """Return the actor's profile.
+
+        Two XRPC calls:
+
+        - `app.bsky.actor.getProfile` for the resolved handle, avatar,
+          banner, and the counters Bluesky exposes publicly.
+        - `com.atproto.repo.getRecord` on the `app.bsky.actor.profile`
+          collection for the raw record (used by `update_profile` to
+          preserve avatar/banner blob refs).
+
+        If the profile record does not exist yet, `getRecord` fails; the
+        actor data alone is still returned.
+        """
+        record = registry.account_record(self.alias)
+        did = record["account_id"] or ""
+        actor = self._client.get("app.bsky.actor.getProfile", params={"actor": did})
+        try:
+            rec = self._client.get(
+                "com.atproto.repo.getRecord",
+                params={
+                    "repo": did,
+                    "collection": self.PROFILE_COLLECTION,
+                    "rkey": self.PROFILE_RKEY,
+                },
+            )
+            rec_value = (rec or {}).get("value") or {}
+        except AccountError:
+            rec_value = {}
+        return ProfileInfo(
+            account=self.alias,
+            handle=actor.get("handle", "") or "",
+            display_name=rec_value.get("displayName", "") or actor.get("displayName", "") or "",
+            about=rec_value.get("description", "") or actor.get("description", "") or "",
+            description=rec_value.get("description", "") or actor.get("description", "") or "",
+            website="",
+            phone="",
+            emails=[],
+            picture_url=actor.get("avatar", "") or "",
+            cover_url=actor.get("banner", "") or "",
+            category="",
+            extras={
+                "followers_count": int(actor.get("followersCount", 0) or 0),
+                "follows_count": int(actor.get("followsCount", 0) or 0),
+                "posts_count": int(actor.get("postsCount", 0) or 0),
+            },
+        )
+
+    def update_profile(self, patch: ProfilePatch) -> None:
+        """Overwrite the profile record, preserving avatar and banner.
+
+        atproto has no partial-update op for records: `putRecord` writes
+        the whole record. The existing record is fetched first so avatar
+        and banner blob refs are kept; only `displayName` and `description`
+        are merged in from `patch`. If the record does not exist yet, a
+        fresh one is created with just the patched fields.
+
+        A `swapRecord` CID is passed on when the existing record carries
+        one so concurrent client-side profile edits do not get clobbered;
+        a mismatch surfaces as `InvalidSwap` from the PDS.
+        """
+        record = registry.account_record(self.alias)
+        did = record["account_id"] or ""
+        if not did:
+            raise AccountError(
+                f"account '{self.alias}' is not connected; "
+                f"run `python scripts/admin.py connect-bluesky --alias {self.alias}`"
+            )
+
+        existing_value: dict = {}
+        existing_cid: str = ""
+        try:
+            rec = self._client.get(
+                "com.atproto.repo.getRecord",
+                params={
+                    "repo": did,
+                    "collection": self.PROFILE_COLLECTION,
+                    "rkey": self.PROFILE_RKEY,
+                },
+            )
+            existing_value = (rec or {}).get("value") or {}
+            existing_cid = (rec or {}).get("cid", "") or ""
+        except AccountError:
+            existing_value = {}
+            existing_cid = ""
+
+        new_value: dict = dict(existing_value)
+        new_value["$type"] = self.PROFILE_COLLECTION
+        if patch.display_name:
+            new_value["displayName"] = patch.display_name
+        if patch.description:
+            new_value["description"] = patch.description
+        elif patch.about and "description" not in new_value:
+            new_value["description"] = patch.about
+
+        body = {
+            "repo": did,
+            "collection": self.PROFILE_COLLECTION,
+            "rkey": self.PROFILE_RKEY,
+            "record": new_value,
+        }
+        if existing_cid:
+            body["swapRecord"] = existing_cid
+        self._client.post("com.atproto.repo.putRecord", body=body)
 
     # ---------- publish helpers ----------
 
@@ -444,9 +561,7 @@ def _media_urls(draft) -> list[str]:
         if source == "url" and key.startswith("https://"):
             urls.append(key)
         else:
-            raise CapabilityError(
-                f"bluesky media must be an https URL; got {key!r}"
-            )
+            raise CapabilityError(f"bluesky media must be an https URL; got {key!r}")
     return urls
 
 
@@ -636,6 +751,8 @@ def _now_iso() -> str:
 def _cutoff_iso(since_days: int) -> str:
     from datetime import timedelta
 
-    return (datetime.now(UTC) - timedelta(days=since_days)).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
+    return (
+        (datetime.now(UTC) - timedelta(days=since_days))
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
     )

@@ -103,9 +103,7 @@ def validate(draft, policy: dict) -> list[PolicyViolation]:
             violations.append(
                 PolicyViolation(
                     field="max_hashtags",
-                    message=(
-                        f"text has {count} hashtags; this account caps at {max_hashtags}"
-                    ),
+                    message=(f"text has {count} hashtags; this account caps at {max_hashtags}"),
                 )
             )
 
@@ -120,9 +118,7 @@ def validate(draft, policy: dict) -> list[PolicyViolation]:
                 violations.append(
                     PolicyViolation(
                         field="allowed_link_domains",
-                        message=(
-                            f"link to '{dom}' is not on this account's domain allowlist"
-                        ),
+                        message=(f"link to '{dom}' is not on this account's domain allowlist"),
                     )
                 )
         if link:
@@ -131,9 +127,7 @@ def validate(draft, policy: dict) -> list[PolicyViolation]:
                 violations.append(
                     PolicyViolation(
                         field="allowed_link_domains",
-                        message=(
-                            f"link to '{dom}' is not on this account's domain allowlist"
-                        ),
+                        message=(f"link to '{dom}' is not on this account's domain allowlist"),
                     )
                 )
 
@@ -151,3 +145,73 @@ def enforce(draft, policy: dict) -> None:
 def warnings_from(violations: list[PolicyViolation]) -> list[str]:
     """Flatten violations for a draft preview (list of strings)."""
     return [f"{v.field}: {v.message}" for v in violations]
+
+
+# -------------------- M9 profile patch policy --------------------
+#
+# Profile edits reuse the account's existing `policy` block: text fields
+# (display_name, about, description) go through banned_characters and
+# banned_words checks; the website is checked against allowed_link_domains
+# when that list is set. The approval scope and the staged payload do not
+# change the rules.
+
+_PROFILE_TEXT_FIELDS = ("display_name", "about", "description")
+
+
+def validate_profile_patch(patch: dict, pol: dict) -> list[PolicyViolation]:
+    """Collect every violation found in `patch`; non-raising."""
+    violations: list[PolicyViolation] = []
+    patch = patch or {}
+
+    banned_chars = pol.get("banned_characters") or []
+    banned_words = pol.get("banned_words") or []
+    lowered_words = [w.lower() for w in banned_words if w]
+
+    for field_name in _PROFILE_TEXT_FIELDS:
+        value = patch.get(field_name) or ""
+        if not value:
+            continue
+        for ch in banned_chars:
+            if ch and ch in value:
+                violations.append(
+                    PolicyViolation(
+                        field="banned_characters",
+                        message=(
+                            f"profile.{field_name} contains a banned character (U+{ord(ch):04X})"
+                        ),
+                    )
+                )
+        lowered = value.lower()
+        for original, word in zip(banned_words, lowered_words, strict=False):
+            if word and word in lowered:
+                violations.append(
+                    PolicyViolation(
+                        field="banned_words",
+                        message=(
+                            f"profile.{field_name} mentions '{original}', "
+                            "which is banned on this account"
+                        ),
+                    )
+                )
+
+    website = (patch.get("website") or "").strip()
+    allowed = [d.lower() for d in (pol.get("allowed_link_domains") or []) if d]
+    if website and allowed:
+        dom = _domain(website)
+        if dom and not any(dom == a or dom.endswith("." + a) for a in allowed):
+            violations.append(
+                PolicyViolation(
+                    field="allowed_link_domains",
+                    message=(f"profile.website '{dom}' is not on this account's domain allowlist"),
+                )
+            )
+
+    return violations
+
+
+def enforce_profile_patch(patch: dict, pol: dict) -> None:
+    """Raise on the first violation in `patch`; the message names the field."""
+    violations = validate_profile_patch(patch, pol)
+    if violations:
+        first = violations[0]
+        raise PolicyError(f"{first.field}: {first.message}")

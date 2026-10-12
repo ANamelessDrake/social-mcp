@@ -16,7 +16,15 @@ import time
 
 from sharedModules import crypto, dynamo, registry
 from sharedModules.errors import AccountError, CapabilityError
-from sharedModules.models import Comment, Insights, Post, PostSummary, PublishResult
+from sharedModules.models import (
+    Comment,
+    Insights,
+    Post,
+    PostSummary,
+    ProfileInfo,
+    ProfilePatch,
+    PublishResult,
+)
 
 from . import mediaStaging
 from .base import Capability, ProviderLimits
@@ -102,6 +110,10 @@ class InstagramProvider:
             Capability.DELETE,
             Capability.COMMENTS,
             Capability.INSIGHTS,
+            # Profile reads only: Instagram's Graph API does not accept
+            # /{ig-user-id} POSTs for bio/name/picture updates. Those edits
+            # go through the Instagram app or the connected Facebook Page.
+            Capability.PROFILE_READ,
         }
     )
     # Instagram caption cap is 2200 chars; carousel children max 10;
@@ -121,10 +133,7 @@ class InstagramProvider:
         registry.require_scope(self.alias, "instagram_basic")
         record = registry.account_record(self.alias)
         ig_user_id = record["account_id"] or "me"
-        fields = (
-            "id,caption,timestamp,permalink,media_type,"
-            "media_url,thumbnail_url,children{id}"
-        )
+        fields = "id,caption,timestamp,permalink,media_type,media_url,thumbnail_url,children{id}"
         params = {"fields": fields, "limit": max(1, min(limit, 50))}
         if since_days > 0:
             params["since"] = f"-{since_days} days"
@@ -188,8 +197,7 @@ class InstagramProvider:
     def list_comments(self, post_id: str, limit: int) -> list[Comment]:
         registry.require_scope(self.alias, "instagram_basic")
         fields = (
-            "id,text,username,timestamp,like_count,"
-            "replies{id,text,username,timestamp,like_count}"
+            "id,text,username,timestamp,like_count,replies{id,text,username,timestamp,like_count}"
         )
         params = {"fields": fields, "limit": max(1, min(limit, 50))}
         data = self._client.get(f"/{post_id}/comments", params=params)
@@ -272,9 +280,7 @@ class InstagramProvider:
             if len(urls) < 2:
                 raise AccountError("multi_image needs two or more media items")
             if len(urls) > 10:
-                raise AccountError(
-                    f"instagram carousel caps at 10 items; got {len(urls)}"
-                )
+                raise AccountError(f"instagram carousel caps at 10 items; got {len(urls)}")
             child_ids: list[str] = []
             for url in urls:
                 child = self._create_container(
@@ -295,8 +301,7 @@ class InstagramProvider:
             )
         elif kind == "text":
             raise CapabilityError(
-                "instagram does not support text-only posts; "
-                "add media or use a different account"
+                "instagram does not support text-only posts; add media or use a different account"
             )
         elif kind == "link":
             raise CapabilityError(
@@ -368,6 +373,56 @@ class InstagramProvider:
         """Hide (not delete) an IG comment; reversible from Meta's own UI."""
         registry.require_scope(self.alias, "instagram_manage_comments")
         self._client.post(f"/{comment_id}", data={"hide": "true"})
+
+    # ---------- profile ops (M9, read only) ----------
+
+    def get_profile(self) -> ProfileInfo:
+        """Return the IG business account's profile snapshot.
+
+        The IG user node exposes `username`, `name`, `biography`,
+        `profile_picture_url`, `website`, plus three counters that are
+        useful enough to surface under `extras`.
+        """
+        registry.require_scope(self.alias, "instagram_basic")
+        record = registry.account_record(self.alias)
+        ig_user_id = record["account_id"] or "me"
+        fields = (
+            "username,name,biography,profile_picture_url,website,"
+            "followers_count,follows_count,media_count"
+        )
+        data = self._client.get(f"/{ig_user_id}", params={"fields": fields})
+        return ProfileInfo(
+            account=self.alias,
+            handle=data.get("username", "") or "",
+            display_name=data.get("name", "") or "",
+            about=data.get("biography", "") or "",
+            description=data.get("biography", "") or "",
+            website=data.get("website", "") or "",
+            phone="",
+            emails=[],
+            picture_url=data.get("profile_picture_url", "") or "",
+            cover_url="",
+            category="",
+            extras={
+                "followers_count": int(data.get("followers_count", 0) or 0),
+                "follows_count": int(data.get("follows_count", 0) or 0),
+                "media_count": int(data.get("media_count", 0) or 0),
+            },
+        )
+
+    def update_profile(self, patch: ProfilePatch) -> None:
+        """Instagram profile edits are not reachable via the Graph API.
+
+        The IG user node accepts no edit POST for bio, name, username, or
+        profile picture; those changes must go through the Instagram app
+        or the connected Facebook Page settings. Raising CapabilityError
+        makes that explicit so the operator sees the real reason, not a
+        silent no-op.
+        """
+        raise CapabilityError(
+            "instagram profile edits must be made in the Instagram app or "
+            "the connected Facebook Page; Graph API does not support them"
+        )
 
     # ---------- publishing precheck + validation ----------
 
@@ -446,9 +501,7 @@ class InstagramProvider:
                 return
             if status in ("ERROR", "EXPIRED"):
                 detail = data.get("status") or status
-                raise AccountError(
-                    f"instagram container '{container_id}' failed: {detail}"
-                )
+                raise AccountError(f"instagram container '{container_id}' failed: {detail}")
             if time.monotonic() + delay > deadline:
                 raise AccountError(
                     f"instagram container '{container_id}' did not finish "

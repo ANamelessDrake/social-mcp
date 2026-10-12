@@ -12,16 +12,19 @@ from . import (
     delete_post,
     discard_draft,
     draft_post,
+    draft_profile_edit,
     edit_post,
     get_draft,
     get_insights,
     get_post,
+    get_profile,
     hide_comment,
     list_accounts,
     list_comments,
     list_drafts,
     list_posts,
     publish_draft,
+    publish_profile_edit,
     reply_to_comment,
     schedule_draft,
     stage_media,
@@ -55,3 +58,7 @@ def register_all(mcp: FastMCP) -> None:
     # comment webhooks + long-poll (M7)
     mcp.tool()(check_comments.check_comments)
     mcp.tool()(wait_for_comments.wait_for_comments)
+    # profile management (M9)
+    mcp.tool()(get_profile.get_profile)
+    mcp.tool()(draft_profile_edit.draft_profile_edit)
+    mcp.tool()(publish_profile_edit.publish_profile_edit)

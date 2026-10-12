@@ -12,7 +12,15 @@ import logging
 
 from sharedModules import crypto, dynamo, registry
 from sharedModules.errors import AccountError, CapabilityError
-from sharedModules.models import Comment, Insights, Post, PostSummary, PublishResult
+from sharedModules.models import (
+    Comment,
+    Insights,
+    Post,
+    PostSummary,
+    ProfileInfo,
+    ProfilePatch,
+    PublishResult,
+)
 
 from .base import Capability, ProviderLimits
 from .metaClient import GraphClient
@@ -52,6 +60,8 @@ class FacebookProvider:
             Capability.DELETE,
             Capability.COMMENTS,
             Capability.INSIGHTS,
+            Capability.PROFILE_READ,
+            Capability.PROFILE_EDIT,
         }
     )
     # Facebook does not publish hard limits for text message length on Pages
@@ -73,8 +83,7 @@ class FacebookProvider:
         record = registry.account_record(self.alias)
         page_id = record["account_id"] or "me"
         fields = (
-            "id,message,created_time,permalink_url,"
-            "attachments{media_type,media,subattachments}"
+            "id,message,created_time,permalink_url,attachments{media_type,media,subattachments}"
         )
         params = {"fields": fields, "limit": max(1, min(limit, 50))}
         if since_days > 0:
@@ -86,8 +95,7 @@ class FacebookProvider:
     def get_post(self, post_id: str) -> Post:
         params = {
             "fields": (
-                "id,message,created_time,permalink_url,"
-                "attachments{media_type,media,subattachments}"
+                "id,message,created_time,permalink_url,attachments{media_type,media,subattachments}"
             ),
         }
         item = self._client.get(f"/{post_id}", params=params)
@@ -120,9 +128,7 @@ class FacebookProvider:
         events for the same id are deduped before this method is called
         again.
         """
-        params = {
-            "fields": "id,from,message,created_time,is_hidden,comment_count,parent"
-        }
+        params = {"fields": "id,from,message,created_time,is_hidden,comment_count,parent"}
         raw = self._client.get(f"/{comment_id}", params=params) or {}
         parent = (raw.get("parent") or {}).get("id") or raw.get("id", "")
         return {
@@ -254,6 +260,66 @@ class FacebookProvider:
         """Hide a comment on a Page post (reversible via Meta's own UI)."""
         self._client.post(f"/{comment_id}", data={"is_hidden": "true"})
 
+    # ---------- profile ops (M9) ----------
+
+    def get_profile(self) -> ProfileInfo:
+        """Fetch the Page's public-facing profile.
+
+        One GET against `/{page-id}` with the writable text fields plus
+        `picture` and `cover`. The Graph API returns `emails` as a list
+        and `picture` as a nested object; the mapping below collapses
+        those into the unified ProfileInfo shape.
+        """
+        record = registry.account_record(self.alias)
+        page_id = record["account_id"] or "me"
+        fields = (
+            "id,name,username,about,description,website,phone,emails,"
+            "category,picture.width(1080),cover"
+        )
+        data = self._client.get(f"/{page_id}", params={"fields": fields})
+        picture_url = ((data.get("picture") or {}).get("data") or {}).get("url", "") or ""
+        cover_url = (data.get("cover") or {}).get("source", "") or ""
+        return ProfileInfo(
+            account=self.alias,
+            handle=data.get("username", "") or "",
+            display_name=data.get("name", "") or "",
+            about=data.get("about", "") or "",
+            description=data.get("description", "") or "",
+            website=data.get("website", "") or "",
+            phone=data.get("phone", "") or "",
+            emails=list(data.get("emails", []) or []),
+            picture_url=picture_url,
+            cover_url=cover_url,
+            category=data.get("category", "") or "",
+        )
+
+    def update_profile(self, patch: ProfilePatch) -> None:
+        """Apply the non-empty text fields of `patch` to the Page.
+
+        Meta's `/{page-id}` POST accepts `about`, `description`, `website`,
+        `phone`, and `emails`. Scope requirement: `pages_manage_metadata`.
+        `emails` is comma-joined per the Graph wire format. The Page's
+        display name (`name`) is deliberately omitted here: changing a
+        Page's name requires Meta's name-change review workflow (which
+        is not a Graph API call), and the shim-level `display_name` on
+        ProfilePatch is reserved for providers that do support it (today
+        Bluesky).
+        """
+        data = _profile_patch_wire(patch)
+        if not data:
+            return
+        self._client.post(f"/{self._page_id()}", data=data)
+
+    def _page_id(self) -> str:
+        record = registry.account_record(self.alias)
+        page_id = record.get("account_id") or ""
+        if not page_id:
+            raise AccountError(
+                f"account '{self.alias}' is not connected; "
+                f"run `python scripts/admin.py connect --alias {self.alias}`"
+            )
+        return page_id
+
     # ---------- publish helpers ----------
 
     def _publish_text(self, page_id: str, draft) -> str:
@@ -384,6 +450,24 @@ class FacebookProvider:
 
 
 # ---------- module-level pure helpers (unit-testable without HTTP) ----------
+
+
+def _profile_patch_wire(patch: ProfilePatch) -> dict:
+    """Produce the Graph POST form for a Page profile update.
+
+    Only non-empty writable fields are included so the operator can approve
+    a partial change. `display_name` is deliberately dropped: Meta's Page
+    name changes do not go through the Graph `/{page-id}` POST.
+    """
+    data: dict[str, str] = {}
+    for key in ("about", "description", "website", "phone"):
+        value = getattr(patch, key, "") or ""
+        if value:
+            data[key] = value
+    emails = [e for e in (getattr(patch, "emails", []) or []) if e]
+    if emails:
+        data["emails"] = ",".join(emails)
+    return data
 
 
 def _media_urls(draft) -> list[str]:

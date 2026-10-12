@@ -15,6 +15,7 @@
       "publish_enabled": false,
       "publish_mode": "manual",
       "auto_for_kinds": [],
+      "profile_edits_enabled": false,
       "policy": {
         "banned_characters": ["\u2014"],
         "banned_words": [],
@@ -30,6 +31,7 @@
       "publish_enabled": false,
       "publish_mode": "manual",
       "auto_for_kinds": [],
+      "profile_edits_enabled": false,
       "policy": {
         "banned_characters": ["\u2014"],
         "banned_words": [],

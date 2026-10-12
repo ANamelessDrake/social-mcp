@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-from sharedModules.models import Comment, Insights, Post, PostSummary
+from sharedModules.models import Comment, Insights, Post, PostSummary, ProfileInfo, ProfilePatch
 
 
 class Capability(StrEnum):
@@ -26,6 +26,8 @@ class Capability(StrEnum):
     DELETE = "delete"
     COMMENTS = "comments"
     INSIGHTS = "insights"
+    PROFILE_READ = "profile_read"
+    PROFILE_EDIT = "profile_edit"
 
 
 @dataclass
@@ -72,3 +74,21 @@ class Provider(Protocol):
     def reply_to_comment(self, comment_id: str, text: str) -> Comment: ...
 
     def hide_comment(self, comment_id: str) -> None: ...
+
+    # ------------- profile ops (M9) -------------
+
+    def get_profile(self) -> ProfileInfo:
+        """Account's public-facing profile metadata.
+
+        Required when the provider declares `Capability.PROFILE_READ`.
+        """
+        ...
+
+    def update_profile(self, patch: ProfilePatch) -> None:
+        """Apply the non-empty fields of `patch` to the account's profile.
+
+        Required when the provider declares `Capability.PROFILE_EDIT`.
+        The Publisher Lambda calls this after the approval re-check; see
+        DESIGN.md section 7.7.
+        """
+        ...

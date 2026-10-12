@@ -34,6 +34,13 @@
     python scripts/admin.py reject --env dev --kind hide-request \\
         --account main-page --comment-id <id>
 
+    # M9: profile edit approvals. One staged change per account; the hash
+    # binds to the full staged patch so a re-stage with a different patch
+    # invalidates the approval.
+    python scripts/admin.py approve-profile-edit --env dev --alias main-page
+    python scripts/admin.py reject --env dev --kind profile-edit \\
+        --account main-page
+
     # Global kill switch (DESIGN.md section 7.6); disables publishing on
     # every account in the deployment regardless of per-account publish_mode.
     python scripts/admin.py disable-publishing --env dev
@@ -157,6 +164,26 @@ PAGE_SCOPES = {
         "instagram_content_publish",
         "instagram_manage_contents",
     ],
+    "profile": [
+        # M9 profile-management tier. Carries the engagement tier plus
+        # `pages_manage_metadata`, which Meta requires for the
+        # /{page-id} POST that updates about/description/website/phone/
+        # emails. Keep narrow so an operator who never edits a Page
+        # profile never grants this.
+        "pages_show_list",
+        "pages_read_engagement",
+        "pages_read_user_content",
+        "read_insights",
+        "business_management",
+        "public_profile",
+        "instagram_basic",
+        "instagram_manage_insights",
+        "pages_manage_posts",
+        "publish_video",
+        "pages_manage_engagement",
+        "instagram_manage_comments",
+        "pages_manage_metadata",
+    ],
 }
 
 
@@ -182,15 +209,14 @@ def _table(config: dict, session):
 
 
 def _meta_app_creds(session, prefix: str) -> dict:
-    secret = session.client("secretsmanager").get_secret_value(
-        SecretId=f"{prefix}-MetaApp"
-    )["SecretString"]
+    secret = session.client("secretsmanager").get_secret_value(SecretId=f"{prefix}-MetaApp")[
+        "SecretString"
+    ]
     try:
         payload = json.loads(secret)
     except ValueError:
         sys.exit(
-            "Meta app secret is not JSON; store it as "
-            '\'{"app_id": "...", "app_secret": "..."}\''
+            'Meta app secret is not JSON; store it as \'{"app_id": "...", "app_secret": "..."}\''
         )
     for field in ("app_id", "app_secret"):
         if not payload.get(field):
@@ -334,9 +360,7 @@ def connect(config: dict, session, alias: str) -> None:
         ig_hint = f" (linked IG: {ig})" if ig else ""
         print(f"  {idx}. {page['name']} [{page['id']}]{ig_hint}")
 
-    which = input(
-        f"\nWhich Page should become alias '{alias}'? (number, or 'q' to quit): "
-    ).strip()
+    which = input(f"\nWhich Page should become alias '{alias}'? (number, or 'q' to quit): ").strip()
     if which.lower() in {"q", "quit", "exit", ""}:
         sys.exit("aborted")
     try:
@@ -524,9 +548,7 @@ def _oauth_callback_url(config: dict, session) -> str:
         for output in stack.get("Outputs", []):
             if output.get("OutputKey") == "OauthCallbackEndpoint":
                 return output["OutputValue"].rstrip("/")
-    sys.exit(
-        "OauthCallbackEndpoint not found in the lambda stack outputs; redeploy to pick it up."
-    )
+    sys.exit("OauthCallbackEndpoint not found in the lambda stack outputs; redeploy to pick it up.")
 
 
 def connect_remote(
@@ -867,9 +889,7 @@ def show_cli(config: dict, session, draft_id: str) -> None:
         current = _canonical_hash(draft)
         stored = approval.get("content_hash", "")
         state = (
-            "approved"
-            if hmac.compare_digest(current, stored)
-            else "STALE (edited after approval)"
+            "approved" if hmac.compare_digest(current, stored) else "STALE (edited after approval)"
         )
         who = approval.get("approved_by", "")
         when = approval.get("approved_at", "")
@@ -972,10 +992,7 @@ def approve_edit_cli(config: dict, session, post_id: str) -> None:
     table = _table(config, session)
     staged = _read_staged_edit(table, post_id)
     if staged is None:
-        sys.exit(
-            f"no staged edit for post '{post_id}'; "
-            "the agent must call edit_post first"
-        )
+        sys.exit(f"no staged edit for post '{post_id}'; the agent must call edit_post first")
     text = staged.get("text", "") or ""
     account = staged.get("account", "")
     print(f"account: {account}")
@@ -1006,10 +1023,7 @@ def approve_delete_cli(config: dict, session, post_id: str) -> None:
     table = _table(config, session)
     staged = _read_staged_delete(table, post_id)
     if staged is None:
-        sys.exit(
-            f"no staged delete for post '{post_id}'; "
-            "the agent must call delete_post first"
-        )
+        sys.exit(f"no staged delete for post '{post_id}'; the agent must call delete_post first")
     account = staged.get("account", "")
     reason = staged.get("reason", "") or ""
     print(f"account: {account}")
@@ -1118,6 +1132,75 @@ def approve_hide_cli(config: dict, session, account: str, revoke: bool) -> None:
         print(f"  {comment_id}: {result.get('ok', False)} {result.get('error', '')}")
 
 
+# -------------------- M9 profile-edit subcommands --------------------
+
+
+def _read_staged_profile_edit(table, account: str) -> dict | None:
+    item = table.get_item(Key={"PK": f"PROFILE_EDIT#{account}", "SK": "META"}).get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def _hash_profile(account: str, patch: dict) -> str:
+    """Mirror sharedModules/approval.py's profile_hash for operator CLI parity."""
+    try:
+        from sharedModules.approval import profile_hash  # type: ignore
+
+        return profile_hash(account, patch)
+    except Exception:  # noqa: BLE001 - deliberate narrow fallback
+        canonical: dict = {}
+        for key in ("display_name", "about", "description", "website", "phone", "emails"):
+            value = (patch or {}).get(key)
+            if key == "emails":
+                if value:
+                    canonical[key] = sorted(str(v) for v in value if v)
+            else:
+                if value:
+                    canonical[key] = str(value)
+        payload = {"account": account or "", "patch": canonical}
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+        return hashlib.sha256(blob).hexdigest()
+
+
+def approve_profile_edit_cli(config: dict, session, alias: str) -> None:
+    table = _table(config, session)
+    staged = _read_staged_profile_edit(table, alias)
+    if staged is None:
+        sys.exit(
+            f"no staged profile edit for account '{alias}'; "
+            "the agent must call draft_profile_edit first"
+        )
+    patch = dict(staged.get("patch") or {})
+    print(f"account: {alias}")
+    print("------- staged patch -------")
+    for key in ("display_name", "about", "description", "website", "phone"):
+        value = patch.get(key)
+        if value:
+            print(f"{key}: {value}")
+    emails = patch.get("emails") or []
+    if emails:
+        print(f"emails: {', '.join(sorted(str(e) for e in emails))}")
+    print("----------------------------")
+    choice = input("\nApprove this profile edit? [y/N]: ").strip().lower()
+    if choice not in {"y", "yes"}:
+        print("not approved")
+        return
+    actor = _actor()
+    content_hash = _hash_profile(alias, patch)
+    _write_item_approval(
+        table,
+        key=f"profile:{alias}",
+        content_hash=content_hash,
+        scope=f"profile:{alias}",
+        actor=actor,
+    )
+    result = _invoke_publisher(
+        config, session, {"kind": "profile_edit", "account": alias, "actor": actor}
+    )
+    print(f"publisher: {json.dumps(result)}")
+
+
 def reject_cli_multi(config: dict, session, kind: str, args) -> None:
     """Reject any staged change by kind: draft | edit | delete | reply | hide-request."""
     table = _table(config, session)
@@ -1182,9 +1265,7 @@ def reject_cli_multi(config: dict, session, kind: str, args) -> None:
         account = args.account
         comment_id = args.comment_id
         if not (account and comment_id):
-            sys.exit(
-                "--account and --comment-id are required for `reject --kind hide-request`"
-            )
+            sys.exit("--account and --comment-id are required for `reject --kind hide-request`")
         table.delete_item(Key={"PK": f"HIDE_REQUEST#{account}", "SK": comment_id})
         _append_audit(
             table,
@@ -1197,6 +1278,23 @@ def reject_cli_multi(config: dict, session, kind: str, args) -> None:
             },
         )
         print(f"rejected queued hide request for '{account}' / '{comment_id}' by {actor}")
+        return
+    if kind == "profile-edit":
+        account = args.account
+        if not account:
+            sys.exit("--account is required for `reject --kind profile-edit`")
+        table.delete_item(Key={"PK": f"PROFILE_EDIT#{account}", "SK": "META"})
+        table.delete_item(Key={"PK": f"APPROVAL#profile:{account}", "SK": "META"})
+        _append_audit(
+            table,
+            {
+                "account": account,
+                "kind": "profile_edit",
+                "actor_identity": actor,
+                "result": "rejected",
+            },
+        )
+        print(f"rejected staged profile edit for '{account}' by {actor}")
         return
     sys.exit(f"unknown reject kind: {kind}")
 
@@ -1221,9 +1319,9 @@ def audit_cli(config: dict, session, account: str, since: str, limit: int) -> No
             ExpressionAttributeValues={":p": "AUDIT#"},
             Limit=limit * 4,
         )
-        rows = sorted(
-            resp.get("Items", []), key=lambda r: r.get("created_at", ""), reverse=True
-        )[:limit]
+        rows = sorted(resp.get("Items", []), key=lambda r: r.get("created_at", ""), reverse=True)[
+            :limit
+        ]
     for row in rows:
         print(
             f"{row.get('created_at', '')} [{row.get('account', '')}] "
@@ -1250,9 +1348,7 @@ def _subscribe_edge(provider: str, account_id: str, token: str) -> dict:
     else:
         fields = "feed,comments"
         url = f"{base}/{account_id}/subscribed_apps"
-    data = urllib.parse.urlencode(
-        {"subscribed_fields": fields, "access_token": token}
-    ).encode()
+    data = urllib.parse.urlencode({"subscribed_fields": fields, "access_token": token}).encode()
     req = urllib.request.Request(url, data=data, method="POST")
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
@@ -1263,10 +1359,7 @@ def _unsubscribe_edge(account_id: str, token: str) -> dict:
     import urllib.request
 
     base = "https://graph.facebook.com/v26.0"
-    url = (
-        f"{base}/{account_id}/subscribed_apps?"
-        + urllib.parse.urlencode({"access_token": token})
-    )
+    url = f"{base}/{account_id}/subscribed_apps?" + urllib.parse.urlencode({"access_token": token})
     req = urllib.request.Request(url, method="DELETE")
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
@@ -1277,10 +1370,7 @@ def _read_edge(account_id: str, token: str) -> dict:
     import urllib.request
 
     base = "https://graph.facebook.com/v26.0"
-    url = (
-        f"{base}/{account_id}/subscribed_apps?"
-        + urllib.parse.urlencode({"access_token": token})
-    )
+    url = f"{base}/{account_id}/subscribed_apps?" + urllib.parse.urlencode({"access_token": token})
     with urllib.request.urlopen(url, timeout=15) as resp:
         return json.loads(resp.read().decode())
 
@@ -1301,9 +1391,7 @@ def _lookup_account(table, alias: str) -> dict:
 def webhook_subscribe_cli(config: dict, session, alias: str) -> None:
     table = _table(config, session)
     account = _lookup_account(table, alias)
-    token = _decrypt_page_token(
-        session, account["page_token_ct"], _kms_key_id(config, session)
-    )
+    token = _decrypt_page_token(session, account["page_token_ct"], _kms_key_id(config, session))
     result = _subscribe_edge(account["provider"], account["account_id"], token)
     print(f"subscribed {alias}: {result}")
 
@@ -1311,9 +1399,7 @@ def webhook_subscribe_cli(config: dict, session, alias: str) -> None:
 def webhook_unsubscribe_cli(config: dict, session, alias: str) -> None:
     table = _table(config, session)
     account = _lookup_account(table, alias)
-    token = _decrypt_page_token(
-        session, account["page_token_ct"], _kms_key_id(config, session)
-    )
+    token = _decrypt_page_token(session, account["page_token_ct"], _kms_key_id(config, session))
     result = _unsubscribe_edge(account["account_id"], token)
     print(f"unsubscribed {alias}: {result}")
 
@@ -1336,9 +1422,7 @@ def webhook_show_cli(config: dict, session) -> None:
             info = _read_edge(item["account_id"], token)
             data = (info or {}).get("data") or []
             subscribed = bool(data)
-            fields = (
-                ",".join(data[0].get("subscribed_fields", [])) if data else ""
-            )
+            fields = ",".join(data[0].get("subscribed_fields", [])) if data else ""
             print(f"{alias}: subscribed={subscribed} fields={fields}")
         except Exception as exc:  # noqa: BLE001
             print(f"{alias}: error reading subscription state: {exc}")
@@ -1363,6 +1447,7 @@ def main() -> None:
         "approve-delete",
         "approve-reply",
         "approve-hide",
+        "approve-profile-edit",
         "disable-publishing",
         "audit",
         "webhook-subscribe",
@@ -1404,12 +1489,21 @@ def main() -> None:
             sp.add_argument(
                 "--kind",
                 default="draft",
-                choices=("draft", "edit", "delete", "reply", "hide-request"),
+                choices=(
+                    "draft",
+                    "edit",
+                    "delete",
+                    "reply",
+                    "hide-request",
+                    "profile-edit",
+                ),
             )
             sp.add_argument("--draft-id", default="")
             sp.add_argument("--post-id", default="")
             sp.add_argument("--comment-id", default="")
             sp.add_argument("--account", default="")
+        if name == "approve-profile-edit":
+            sp.add_argument("--alias", required=True)
         if name in ("approve-edit", "approve-delete"):
             sp.add_argument("--post-id", required=True)
         if name == "approve-reply":
@@ -1468,6 +1562,8 @@ def main() -> None:
         approve_reply_cli(config, session, args.comment_id)
     elif args.command == "approve-hide":
         approve_hide_cli(config, session, args.account, args.revoke)
+    elif args.command == "approve-profile-edit":
+        approve_profile_edit_cli(config, session, args.alias)
     elif args.command == "disable-publishing":
         disable_publishing_cli(config, session, args.enable)
     elif args.command == "audit":

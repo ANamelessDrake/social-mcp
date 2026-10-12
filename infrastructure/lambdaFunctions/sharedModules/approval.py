@@ -237,6 +237,72 @@ def verify_hide_approval(account: str) -> dict:
     return standing
 
 
+# -------------------- M9 profile edit approval --------------------
+#
+# The profile scope hashes `{account, patch}` where `patch` is a stable
+# projection of the staged change: only truthy keys, strings as-is, email
+# lists sorted. A re-stage with a different patch invalidates the record;
+# the Publisher reads the staged patch (not what the agent re-sent) so
+# what reaches the provider is what the operator saw.
+
+
+_PROFILE_WRITABLE_FIELDS = ("display_name", "about", "description", "website", "phone", "emails")
+
+
+def _canonical_profile_patch(patch: dict) -> dict:
+    """Keep only known writable fields that carry a truthy value.
+
+    Strings are passed through, emails is sorted so the order the agent
+    sent in does not change the hash.
+    """
+    patch = patch or {}
+    out: dict = {}
+    for key in _PROFILE_WRITABLE_FIELDS:
+        value = patch.get(key)
+        if key == "emails":
+            if value:
+                out[key] = sorted(str(v) for v in value if v)
+        else:
+            if value:
+                out[key] = str(value)
+    return out
+
+
+def profile_hash(account: str, patch: dict) -> str:
+    """Hash of a staged profile edit (account + canonical patch)."""
+    payload = {"account": account or "", "patch": _canonical_profile_patch(patch)}
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def record_profile_approval(account: str, patch: dict, approved_by: str) -> dict:
+    content_hash = profile_hash(account, patch)
+    dynamo.write_approval_record(
+        key=f"profile:{account}",
+        content_hash=content_hash,
+        approved_by=approved_by,
+        scope=f"profile:{account}",
+    )
+    return {"account": account, "content_hash": content_hash}
+
+
+def verify_profile_approval(account: str, patch: dict) -> dict:
+    approval = dynamo.read_approval_record(f"profile:{account}")
+    if approval is None:
+        raise ApprovalError(
+            f"profile edit of '{account}' has no approval record; "
+            f"run `python scripts/admin.py approve-profile-edit --alias {account}`"
+        )
+    current = profile_hash(account, patch)
+    stored = approval.get("content_hash", "")
+    if not hmac.compare_digest(current, stored):
+        raise ApprovalError(
+            f"profile edit of '{account}' was changed after approval; "
+            f"re-run `python scripts/admin.py approve-profile-edit --alias {account}`"
+        )
+    return approval
+
+
 def _hash_item(draft) -> str:
     """Hash a draft dict (as it comes from Dynamo) or a Draft dataclass."""
     if hasattr(draft, "__dataclass_fields__"):

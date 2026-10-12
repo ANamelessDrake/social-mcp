@@ -39,6 +39,7 @@ def list_accounts() -> dict:
                     "publish_enabled": bool(record.get("publish_enabled", False)),
                     "publish_mode": record.get("publish_mode", "manual"),
                     "auto_for_kinds": list(record.get("auto_for_kinds", [])),
+                    "profile_edits_enabled": bool(record.get("profile_edits_enabled", False)),
                     "scopes": record["scopes"],
                     "capabilities": capabilities,
                 }

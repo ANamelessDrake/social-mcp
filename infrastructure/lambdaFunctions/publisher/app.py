@@ -16,6 +16,7 @@ The event discriminator is `kind` (default `publish` for M2 compat):
 - `{"kind": "delete",   "post_id": "..."}`   (M3)
 - `{"kind": "reply",    "comment_id": "..."}` (M3)
 - `{"kind": "hide",     "account": "...", "comment_id": "..."}` (M3)
+- `{"kind": "profile_edit", "account": "..."}` (M9)
 
 Flow is kind-specific. For every path:
 - re-verify the matching per-item approval (hash, or standing for hide),
@@ -65,6 +66,8 @@ def handler(event, context):
         return _handle_reply(event, actor)
     if kind == "hide":
         return _handle_hide(event, actor)
+    if kind == "profile_edit":
+        return _handle_profile_edit(event, actor)
     return _error(f"unknown publisher event kind '{kind}'")
 
 
@@ -350,6 +353,83 @@ def _handle_hide(event: dict, actor: str) -> dict:
         return _error(f"unexpected failure: {type(e).__name__}")
 
 
+# ---------------- profile_edit (M9) ----------------
+
+
+def _handle_profile_edit(event: dict, actor: str) -> dict:
+    account = event.get("account") or ""
+    if not account:
+        return _error("missing account in profile_edit event")
+    staged = dynamo.read_staged_profile_edit(account)
+    if staged is None:
+        return _error(f"profile edit of '{account}' has no staged change")
+    patch_dict = staged.get("patch") or {}
+
+    try:
+        approval_mod.verify_profile_approval(account, patch_dict)
+        entry = _entry_or_fail(account)
+        if not isinstance(entry, dict) or "ok" in entry:
+            return entry
+        policy.enforce_profile_patch(patch_dict, entry.get("policy") or {})
+        kill = _kill_switch_check(entry, account)
+        if kill is not None:
+            return kill
+        from sharedModules.models import ProfilePatch
+
+        provider = get_provider(account)
+        provider.update_profile(ProfilePatch(**_coerce_patch(patch_dict)))
+        dynamo.append_audit(
+            {
+                "account": account,
+                "kind": "profile_edit",
+                "actor_identity": actor,
+                "result": "ok",
+            }
+        )
+        dynamo.delete_approval_record(f"profile:{account}")
+        dynamo.delete_staged_profile_edit(account)
+        return {"ok": True, "account": account}
+    except approval_mod.ApprovalError as e:
+        _audit_item_failure(account, "profile_edit", actor, account, "approval_mismatch", str(e))
+        return _error(str(e))
+    except policy.PolicyError as e:
+        _audit_item_failure(account, "profile_edit", actor, account, "policy", str(e))
+        return _error(f"policy: {e}")
+    except CapabilityError as e:
+        _audit_item_failure(account, "profile_edit", actor, account, "capability", str(e))
+        return _error(str(e))
+    except NotImplementedError as e:
+        _audit_item_failure(account, "profile_edit", actor, account, "not_implemented", str(e))
+        return _error(str(e) or "that kind is not yet supported on this provider")
+    except AccountError as e:
+        _audit_item_failure(account, "profile_edit", actor, account, "provider", str(e))
+        return _error(str(e))
+    except Exception as e:  # noqa: BLE001 - last-ditch safety
+        log.exception("unexpected profile_edit failure")
+        _audit_item_failure(account, "profile_edit", actor, account, "unexpected", "internal error")
+        return _error(f"unexpected failure: {type(e).__name__}")
+
+
+def _coerce_patch(patch_dict: dict) -> dict:
+    """Narrow a staged-patch dict to the fields ProfilePatch accepts.
+
+    DynamoDB brings strings and lists back untyped; this keeps only the
+    writable keys and coerces `emails` to a list of strings so a stored
+    DynamoDB set does not slip through.
+    """
+    allowed = ("display_name", "about", "description", "website", "phone", "emails")
+    out: dict = {}
+    for key in allowed:
+        if key not in patch_dict:
+            continue
+        value = patch_dict[key]
+        if key == "emails":
+            out[key] = [str(v) for v in (value or []) if v]
+        else:
+            out[key] = str(value or "")
+    return out
+
+
 # ---------------- shared helpers ----------------
 
 
@@ -373,8 +453,7 @@ def _kill_switch_check(entry: dict, account: str) -> dict | None:
         )
     if not entry.get("publish_enabled", False):
         return _error(
-            f"account '{account}' has publish_enabled: false; "
-            "enable it in config and redeploy"
+            f"account '{account}' has publish_enabled: false; enable it in config and redeploy"
         )
     return None
 
