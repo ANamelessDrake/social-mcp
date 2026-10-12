@@ -479,6 +479,7 @@ def _insights_dict(ins: Insights) -> dict:
     return {
         "impressions": ins.impressions,
         "reach": ins.reach,
+        "views": ins.views,
         "engagements": ins.engagements,
         "reactions": ins.reactions,
         "comments": ins.comments,

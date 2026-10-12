@@ -68,6 +68,9 @@ class Insights:
     post_id: str
     impressions: int = 0
     reach: int = 0
+    # IG video / reel plays. Meta deprecated the media-level `impressions`
+    # metric for Instagram on 2025-01-21; reach + views carry that signal now.
+    views: int = 0
     engagements: int = 0
     reactions: int = 0
     comments: int = 0

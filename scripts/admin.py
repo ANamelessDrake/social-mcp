@@ -73,9 +73,11 @@ GRAPH_API_VERSION = "v26.0"
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 FB_AUTH_URL = "https://www.facebook.com/{v}/dialog/oauth".format(v=GRAPH_API_VERSION)
 
-# Scopes bundle per capability tier. M3 engagement scopes land with that
-# milestone; M1 and M2 are listed here so `--scopes publish` upgrades a
-# previously read-only connection without re-reading the docs.
+# Scopes bundle per capability tier. One Facebook Login consent covers both
+# the Pages product and the Instagram Platform product, so the IG scopes
+# ride on every tier (M4 reads need `instagram_basic` +
+# `instagram_manage_insights`; comments on IG need `instagram_manage_comments`
+# which lands on the engagement tier alongside the Page-side equivalent).
 PAGE_SCOPES = {
     "readonly": [
         "pages_show_list",
@@ -84,6 +86,9 @@ PAGE_SCOPES = {
         "read_insights",
         "business_management",
         "public_profile",
+        # M4 IG reads (one Facebook consent dialog covers both products):
+        "instagram_basic",
+        "instagram_manage_insights",
     ],
     "publish": [
         "pages_show_list",
@@ -92,6 +97,8 @@ PAGE_SCOPES = {
         "read_insights",
         "business_management",
         "public_profile",
+        "instagram_basic",
+        "instagram_manage_insights",
         # M2 additions:
         "pages_manage_posts",
         "publish_video",
@@ -103,10 +110,13 @@ PAGE_SCOPES = {
         "read_insights",
         "business_management",
         "public_profile",
+        "instagram_basic",
+        "instagram_manage_insights",
         "pages_manage_posts",
         "publish_video",
-        # M3 addition:
+        # M3 additions (Pages side) plus the IG-side comment write scope:
         "pages_manage_engagement",
+        "instagram_manage_comments",
     ],
 }
 

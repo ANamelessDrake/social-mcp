@@ -1,0 +1,36 @@
+{
+  "data": [
+    {
+      "id": "17900000000000001",
+      "text": "Looks great, congrats on shipping.",
+      "username": "example_user_a",
+      "timestamp": "2026-10-10T19:00:00+0000",
+      "like_count": 3,
+      "replies": {
+        "data": [
+          {
+            "id": "17900000000000011",
+            "text": "Thanks! Been in the works for a while.",
+            "username": "example_brand",
+            "timestamp": "2026-10-10T19:04:00+0000",
+            "like_count": 1
+          },
+          {
+            "id": "17900000000000012",
+            "text": "Which region did you deploy first?",
+            "username": "example_user_a",
+            "timestamp": "2026-10-10T19:08:00+0000",
+            "like_count": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "17900000000000002",
+      "text": "Nice.",
+      "username": "example_user_b",
+      "timestamp": "2026-10-10T20:00:00+0000",
+      "like_count": 0
+    }
+  ]
+}

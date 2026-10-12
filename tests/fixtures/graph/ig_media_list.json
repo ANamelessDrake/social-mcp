@@ -1,0 +1,46 @@
+{
+  "data": [
+    {
+      "id": "17895000000000001",
+      "caption": "Launch day! The new deploy pipeline is live. #deploy #launch",
+      "timestamp": "2026-10-10T18:04:12+0000",
+      "permalink": "https://www.instagram.com/p/CfakeAAA/",
+      "media_type": "IMAGE",
+      "media_url": "https://example.com/ig/launch.jpg",
+      "thumbnail_url": "https://example.com/ig/launch_thumb.jpg"
+    },
+    {
+      "id": "17895000000000002",
+      "caption": "Behind-the-scenes carousel.",
+      "timestamp": "2026-10-09T14:00:00+0000",
+      "permalink": "https://www.instagram.com/p/CfakeBBB/",
+      "media_type": "CAROUSEL_ALBUM",
+      "children": {
+        "data": [
+          {"id": "17895000000000011"},
+          {"id": "17895000000000012"},
+          {"id": "17895000000000013"}
+        ]
+      }
+    },
+    {
+      "id": "17895000000000003",
+      "caption": "Reel: five seconds of synth output.",
+      "timestamp": "2026-10-08T09:30:00+0000",
+      "permalink": "https://www.instagram.com/p/CfakeCCC/",
+      "media_type": "REELS",
+      "media_url": "https://example.com/ig/synth.mp4",
+      "thumbnail_url": "https://example.com/ig/synth_thumb.jpg"
+    },
+    {
+      "id": "17895000000000004",
+      "caption": "Short clip.",
+      "timestamp": "2026-10-07T12:00:00+0000",
+      "permalink": "https://www.instagram.com/p/CfakeDDD/",
+      "media_type": "VIDEO",
+      "media_url": "https://example.com/ig/clip.mp4",
+      "thumbnail_url": "https://example.com/ig/clip_thumb.jpg"
+    }
+  ],
+  "paging": {"cursors": {"before": "b", "after": "a"}}
+}

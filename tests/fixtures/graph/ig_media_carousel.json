@@ -1,0 +1,31 @@
+{
+  "id": "17895000000000002",
+  "caption": "Behind-the-scenes carousel.",
+  "timestamp": "2026-10-09T14:00:00+0000",
+  "permalink": "https://www.instagram.com/p/CfakeBBB/",
+  "media_type": "CAROUSEL_ALBUM",
+  "like_count": 310,
+  "comments_count": 24,
+  "children": {
+    "data": [
+      {
+        "id": "17895000000000011",
+        "media_type": "IMAGE",
+        "media_url": "https://example.com/ig/bts_1.jpg",
+        "thumbnail_url": "https://example.com/ig/bts_1_thumb.jpg"
+      },
+      {
+        "id": "17895000000000012",
+        "media_type": "IMAGE",
+        "media_url": "https://example.com/ig/bts_2.jpg",
+        "thumbnail_url": "https://example.com/ig/bts_2_thumb.jpg"
+      },
+      {
+        "id": "17895000000000013",
+        "media_type": "VIDEO",
+        "media_url": "https://example.com/ig/bts_3.mp4",
+        "thumbnail_url": "https://example.com/ig/bts_3_thumb.jpg"
+      }
+    ]
+  }
+}

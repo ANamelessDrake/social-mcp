@@ -91,8 +91,20 @@ python scripts/admin.py connect --env dev --alias main-page --scopes publish
 python scripts/admin.py connect --env dev --alias main-page --scopes engagement
 ```
 
-Instagram-side comment write access (`instagram_manage_comments`) lands
-with M4/M5.
+Instagram-side scopes ride on every bundle because one Facebook Login
+consent covers both the Pages and Instagram Platform products:
+
+- `readonly` and `publish` include `instagram_basic` and
+  `instagram_manage_insights` so IG `list_posts` / `get_post` /
+  `list_comments` / `get_insights` work on the IG account connected
+  through the same Page.
+- `engagement` adds `instagram_manage_comments` for IG-side
+  `reply_to_comment` / `hide_comment` once those land in M5.
+
+Instagram publishing (`instagram_content_publish`) and media delete
+(`instagram_manage_contents`) land with M5; they are not requested at
+M4 so the consent dialog stays scoped to what the server can actually
+use today.
 
 ## 5. (M2) Enable publishing in config
 
@@ -177,3 +189,48 @@ python scripts/admin.py approve-hide --env dev --account main-page --revoke
 python scripts/admin.py reject --env dev --kind hide-request \
     --account main-page --comment-id <id>
 ```
+
+## 8. (M4) Instagram, reached through the linked Page
+
+An Instagram business or creator account is not a separate OAuth grant.
+The `connect` flow enumerates `/me/accounts`, detects each Page's
+`instagram_business_account`, and (when you say yes) writes a second
+ACCOUNT item for the IG account that stores **the same Page token**.
+The IG account item carries the IG user id as `account_id` and the Page
+alias in `linked_page`; the Page item carries the IG alias in
+`linked_ig_account`.
+
+Reads then just work:
+
+```bash
+# Call tools against the IG alias (e.g. 'main-page-ig'):
+#   list_posts(account='main-page-ig')     -> IG media newest first
+#   get_post(post_id=<ig_media_id>, account='main-page-ig')
+#   list_comments(post_id=<ig_media_id>, account='main-page-ig')
+#   get_insights(post_id=<ig_media_id>, account='main-page-ig')
+```
+
+Media types map as follows (DESIGN.md section 6):
+
+| IG `media_type` | Unified `kind` |
+|---|---|
+| `IMAGE` | `image` |
+| `VIDEO` | `video` |
+| `CAROUSEL_ALBUM` | `multi_image` |
+| `REELS` | `reel` |
+
+Insights are media-type aware (image / carousel share one metric set;
+video / reel add `views` and `ig_reels_video_view_total_time`). Meta
+deprecated the media-level `impressions`, `plays`, `clips_replays_count`,
+and `ig_reels_aggregated_all_plays_count` on 2025-01-21; the provider
+never requests those.
+
+If a tool returns "account '...' did not grant 'instagram_manage_insights'
+at consent time", re-run connect to pick up the current `readonly` bundle:
+
+```bash
+python scripts/admin.py connect --env dev --alias main-page --scopes readonly
+```
+
+This overwrites the Page tokens on the Page item (and, through the shared
+token, re-enables the linked IG alias).
