@@ -10,10 +10,24 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Account:
-    """Static account roster entry; dynamic grant state is in DynamoDB."""
+    """Static account roster entry; dynamic grant state is in DynamoDB.
+
+    The DynamoDB ACCOUNT item carries two KMS-encrypted token fields whose
+    meaning depends on the provider:
+
+    - `facebook` / `instagram`: `page_token_ct` is the long-lived Page
+      token (used for both FB and the linked IG account); `user_token_ct`
+      is the long-lived user token on the primary account for the eventual
+      user-token refresh path.
+    - `bluesky`: `page_token_ct` is the short-lived access JWT and
+      `user_token_ct` is the refresh JWT. The names are kept across
+      providers so `crypto.encrypt` / `dynamo.update_tokens` stay provider-
+      agnostic; the comment at the dataclass is the one source of truth
+      for the overload.
+    """
 
     alias: str
-    provider: str  # "facebook" | "instagram"
+    provider: str  # "facebook" | "instagram" | "bluesky"
     publish_enabled: bool = False
     publish_mode: str = "manual"  # "manual" | "auto" | "auto_for"
     auto_for_kinds: list[str] = field(default_factory=list)

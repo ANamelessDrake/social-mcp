@@ -1,0 +1,7 @@
+{
+  "did": "did:plc:examplehandle1234567890",
+  "handle": "wilma.bsky.social",
+  "email": "placeholder@example.com",
+  "accessJwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkaWQ6cGxjOmV4YW1wbGUifQ.aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "refreshJwt": "eyJhbGciOiJIUzI1NiJ9.eyJyZWZyZXNoIjp0cnVlfQ.rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+}

@@ -1,0 +1,22 @@
+{
+  "thread": {
+    "$type": "app.bsky.feed.defs#threadViewPost",
+    "post": {
+      "uri": "at://did:plc:examplehandle1234567890/app.bsky.feed.post/3la000text1",
+      "cid": "bafyreiexampletext1",
+      "author": {
+        "did": "did:plc:examplehandle1234567890",
+        "handle": "wilma.bsky.social"
+      },
+      "record": {
+        "$type": "app.bsky.feed.post",
+        "text": "Shipping the new deploy pipeline today. Faster synth and no more flaky rollouts.",
+        "createdAt": "2026-10-10T18:04:12Z"
+      },
+      "likeCount": 7,
+      "replyCount": 2,
+      "repostCount": 1,
+      "quoteCount": 0
+    }
+  }
+}

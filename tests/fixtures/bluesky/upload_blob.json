@@ -1,0 +1,8 @@
+{
+  "blob": {
+    "$type": "blob",
+    "ref": {"$link": "bafyreiexampleuploadedblob"},
+    "mimeType": "image/jpeg",
+    "size": 54321
+  }
+}

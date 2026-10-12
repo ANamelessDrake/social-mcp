@@ -1,0 +1,74 @@
+{
+  "thread": {
+    "$type": "app.bsky.feed.defs#threadViewPost",
+    "post": {
+      "uri": "at://did:plc:examplehandle1234567890/app.bsky.feed.post/3la000text1",
+      "cid": "bafyreiexampletext1",
+      "author": {
+        "did": "did:plc:examplehandle1234567890",
+        "handle": "wilma.bsky.social"
+      },
+      "record": {
+        "$type": "app.bsky.feed.post",
+        "text": "Shipping the new deploy pipeline today. Faster synth and no more flaky rollouts.",
+        "createdAt": "2026-10-10T18:04:12Z"
+      },
+      "likeCount": 7,
+      "replyCount": 2,
+      "repostCount": 1,
+      "quoteCount": 0
+    },
+    "replies": [
+      {
+        "$type": "app.bsky.feed.defs#threadViewPost",
+        "post": {
+          "uri": "at://did:plc:examplereplier0000000001/app.bsky.feed.post/3la000reply1",
+          "cid": "bafyreiexamplereply1",
+          "author": {
+            "did": "did:plc:examplereplier0000000001",
+            "handle": "replier.bsky.social"
+          },
+          "record": {
+            "$type": "app.bsky.feed.post",
+            "text": "Nice work. Rollout time?",
+            "createdAt": "2026-10-10T18:10:00Z",
+            "reply": {
+              "root": {"uri": "at://did:plc:examplehandle1234567890/app.bsky.feed.post/3la000text1", "cid": "bafyreiexampletext1"},
+              "parent": {"uri": "at://did:plc:examplehandle1234567890/app.bsky.feed.post/3la000text1", "cid": "bafyreiexampletext1"}
+            }
+          },
+          "likeCount": 1,
+          "replyCount": 1,
+          "repostCount": 0,
+          "quoteCount": 0
+        },
+        "replies": [
+          {
+            "$type": "app.bsky.feed.defs#threadViewPost",
+            "post": {
+              "uri": "at://did:plc:examplehandle1234567890/app.bsky.feed.post/3la000reply2",
+              "cid": "bafyreiexamplereply2",
+              "author": {
+                "did": "did:plc:examplehandle1234567890",
+                "handle": "wilma.bsky.social"
+              },
+              "record": {
+                "$type": "app.bsky.feed.post",
+                "text": "About four minutes end to end.",
+                "createdAt": "2026-10-10T18:12:00Z",
+                "reply": {
+                  "root": {"uri": "at://did:plc:examplehandle1234567890/app.bsky.feed.post/3la000text1", "cid": "bafyreiexampletext1"},
+                  "parent": {"uri": "at://did:plc:examplereplier0000000001/app.bsky.feed.post/3la000reply1", "cid": "bafyreiexamplereply1"}
+                }
+              },
+              "likeCount": 0,
+              "replyCount": 0,
+              "repostCount": 0,
+              "quoteCount": 0
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

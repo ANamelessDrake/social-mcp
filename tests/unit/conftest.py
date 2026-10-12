@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 LAMBDA_DIR = ROOT / "infrastructure" / "lambdaFunctions"
 FIXTURES = ROOT / "tests" / "fixtures" / "graph"
+BLUESKY_FIXTURES = ROOT / "tests" / "fixtures" / "bluesky"
 
 # Mirror the deployed bundle layout: function code at the root,
 # sharedModules beside it.
@@ -44,6 +45,10 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 
 def load_fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text())
+
+
+def load_bluesky_fixture(name: str) -> dict:
+    return json.loads((BLUESKY_FIXTURES / name).read_text())
 
 
 def clear_caches() -> None:

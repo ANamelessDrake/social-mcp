@@ -23,6 +23,21 @@
         "allowed_link_domains": [],
         "voice": "brand"
       }
+    },
+    {
+      "alias": "example-bsky",
+      "provider": "bluesky",
+      "publish_enabled": false,
+      "publish_mode": "manual",
+      "auto_for_kinds": [],
+      "policy": {
+        "banned_characters": ["\u2014"],
+        "banned_words": [],
+        "required_signoff": "",
+        "max_hashtags": -1,
+        "allowed_link_domains": [],
+        "voice": "brand"
+      }
     }
   ]
 }

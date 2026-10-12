@@ -5,6 +5,9 @@
     python scripts/admin.py connect --env dev --alias main-page \\
         [--scopes publish|engagement]
 
+    # Connect a Bluesky account (handle + app password)
+    python scripts/admin.py connect-bluesky --env dev --alias main-bsky
+
     # Inspect
     python scripts/admin.py list-accounts --env dev
     python scripts/admin.py list-drafts --env dev [--account main-page]
@@ -415,6 +418,83 @@ def _kms_key_id(config: dict, session) -> str:
     env_project = f"{config['environment_name']}-{config['project_name']}"
     alias = f"alias/{env_project}-tokens"
     return session.client("kms").describe_key(KeyId=alias)["KeyMetadata"]["KeyId"]
+
+
+# -------------------- Bluesky connect (app-password session) --------------------
+
+
+def connect_bluesky(config: dict, session, alias: str) -> None:
+    """Create a Bluesky session with a handle + app password, store it.
+
+    Bluesky does not have an OAuth consent dialog in the way Meta does.
+    A user mints an app password at https://bsky.app/settings/app-passwords
+    and the server trades `(handle, app_password)` for an `(accessJwt,
+    refreshJwt)` pair via `com.atproto.server.createSession`. We treat the
+    pair the same way the Meta flow treats a Page token: KMS-encrypt both
+    and persist as the ACCOUNT item. The scope is just `"bluesky"` because
+    app passwords grant whatever the account can do (except mint more app
+    passwords); the server's publish_mode / policy fences cover the rest.
+    """
+    entries = {a["alias"]: a for a in config.get("accounts", [])}
+    if alias not in entries:
+        sys.exit(
+            f"account '{alias}' is not in config/{config['environment_name']}.json; add it first"
+        )
+    if entries[alias].get("provider") != "bluesky":
+        sys.exit(
+            f"account '{alias}' has provider '{entries[alias].get('provider')}' in config; "
+            "connect-bluesky expects provider='bluesky'"
+        )
+
+    handle = input("Bluesky handle (e.g. wilma.bsky.social): ").strip()
+    if not handle:
+        sys.exit("aborted: no handle given")
+    prompt = "Bluesky app password (hidden, from bsky.app/settings): "
+    app_password = getpass.getpass(prompt).strip()
+    if not app_password:
+        sys.exit("aborted: no app password given")
+
+    from sharedModules.providers.blueskyClient import post_json  # type: ignore
+
+    try:
+        body = post_json(
+            "/xrpc/com.atproto.server.createSession",
+            {"identifier": handle, "password": app_password},
+        )
+    except Exception as exc:  # noqa: BLE001
+        sys.exit(f"Bluesky createSession failed: {exc}")
+
+    did = body.get("did") or ""
+    access = body.get("accessJwt") or ""
+    refresh = body.get("refreshJwt") or ""
+    resolved_handle = body.get("handle") or handle
+    if not (did and access and refresh):
+        sys.exit("Bluesky createSession returned no did/accessJwt/refreshJwt")
+
+    key_id = _kms_key_id(config, session)
+    kms = session.client("kms")
+    access_ct = kms.encrypt(KeyId=key_id, Plaintext=access.encode())["CiphertextBlob"]
+    refresh_ct = kms.encrypt(KeyId=key_id, Plaintext=refresh.encode())["CiphertextBlob"]
+
+    table = _table(config, session)
+    table.put_item(
+        Item={
+            "PK": f"ACCOUNT#{alias}",
+            "SK": "META",
+            "provider": "bluesky",
+            "account_id": did,
+            "display_name": resolved_handle,
+            # App passwords are all-or-nothing in Bluesky's permission model;
+            # the single "bluesky" scope stands in for every capability.
+            "scopes": ["bluesky"],
+            # Token overload (see models.Account docstring):
+            # page_token_ct = accessJwt, user_token_ct = refreshJwt.
+            "page_token_ct": access_ct,
+            "user_token_ct": refresh_ct,
+            "status": "active",
+        }
+    )
+    print(f"account '{alias}' connected: {resolved_handle} [{did}]")
 
 
 # -------------------- M6 hosted callback (connect --remote) --------------------
@@ -1273,6 +1353,7 @@ def main() -> None:
 
     for name in (
         "connect",
+        "connect-bluesky",
         "list-accounts",
         "list-drafts",
         "show",
@@ -1291,6 +1372,8 @@ def main() -> None:
         sp = sub.add_parser(name)
         sp.add_argument("--env", required=True)
         sp.add_argument("--profile", default=None)
+        if name == "connect-bluesky":
+            sp.add_argument("--alias", required=True)
         if name == "connect":
             sp.add_argument("--alias", required=True)
             sp.add_argument("--scopes", default="readonly", choices=sorted(PAGE_SCOPES))
@@ -1365,6 +1448,8 @@ def main() -> None:
             )
         else:
             connect(config, session, args.alias)
+    elif args.command == "connect-bluesky":
+        connect_bluesky(config, session, args.alias)
     elif args.command == "list-accounts":
         list_accounts_cli(config, session)
     elif args.command == "list-drafts":
