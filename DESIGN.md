@@ -1160,3 +1160,17 @@ follow-ons.
   draft-and-approve loop. The same pattern applies here: an operator
   gets a Slack DM with the draft, replies "yes", and the publish fires.
   Worth prototyping as a client in `clients/` after M5.
+- **Shared CloudFront in front of all MCPs**: planned, not built. One
+  distribution with path-based cache behaviors, each routing to a
+  different MCP's Function URL (slack-mcp, mail-mcp, social-mcp). One
+  cert, one Route53 record, consistent SSE tuning (caching disabled,
+  origin read timeout bumped, `Authorization` and
+  `X-Hub-Signature-256` forwarded). ACM cert in us-east-1, Function
+  URL auth stays `NONE`, the bearer-token check stays in each Lambda,
+  the IP allowlist keeps using the Function URL's own request context
+  so CloudFront's `cloudfront-viewer-address` header does not have to
+  be trusted. Open question is the ownership of the shared stack: a
+  new `mcp-infra` repo, or hosted in one MCP with the others
+  referencing it. Current state (raw `*.lambda-url` URLs plus the VPN
+  allowlist) covers the actual need, so this is deferred until a
+  reason beyond ergonomics shows up.
