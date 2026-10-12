@@ -57,7 +57,6 @@ PAGE_SCOPES = {
         "instagram_basic",
         "instagram_manage_insights",
         "pages_manage_posts",
-        "publish_video",
     ],
     "engagement": [
         "pages_show_list",
@@ -69,7 +68,6 @@ PAGE_SCOPES = {
         "instagram_basic",
         "instagram_manage_insights",
         "pages_manage_posts",
-        "publish_video",
         "pages_manage_engagement",
         "instagram_manage_comments",
     ],
@@ -83,7 +81,6 @@ PAGE_SCOPES = {
         "instagram_basic",
         "instagram_manage_insights",
         "pages_manage_posts",
-        "publish_video",
         "instagram_content_publish",
     ],
     "delete-contents": [
@@ -96,7 +93,6 @@ PAGE_SCOPES = {
         "instagram_basic",
         "instagram_manage_insights",
         "pages_manage_posts",
-        "publish_video",
         "pages_manage_engagement",
         "instagram_manage_comments",
         "instagram_content_publish",

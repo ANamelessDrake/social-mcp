@@ -112,7 +112,6 @@ PAGE_SCOPES = {
         "instagram_manage_insights",
         # M2 additions:
         "pages_manage_posts",
-        "publish_video",
     ],
     "engagement": [
         "pages_show_list",
@@ -124,7 +123,6 @@ PAGE_SCOPES = {
         "instagram_basic",
         "instagram_manage_insights",
         "pages_manage_posts",
-        "publish_video",
         # M3 additions (Pages side) plus the IG-side comment write scope:
         "pages_manage_engagement",
         "instagram_manage_comments",
@@ -142,7 +140,6 @@ PAGE_SCOPES = {
         "instagram_basic",
         "instagram_manage_insights",
         "pages_manage_posts",
-        "publish_video",
         "instagram_content_publish",
     ],
     "delete-contents": [
@@ -158,7 +155,6 @@ PAGE_SCOPES = {
         "instagram_basic",
         "instagram_manage_insights",
         "pages_manage_posts",
-        "publish_video",
         "pages_manage_engagement",
         "instagram_manage_comments",
         "instagram_content_publish",
@@ -179,7 +175,6 @@ PAGE_SCOPES = {
         "instagram_basic",
         "instagram_manage_insights",
         "pages_manage_posts",
-        "publish_video",
         "pages_manage_engagement",
         "instagram_manage_comments",
         "pages_manage_metadata",
@@ -249,8 +244,13 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         pass
 
 
-def _consent_code(app_id: str, scopes: list[str]) -> tuple[str, str]:
-    """Run the browser consent; return (code, redirect_uri)."""
+def _consent_code(app_id: str, scopes: list[str], config_id: str = "") -> tuple[str, str]:
+    """Run the browser consent; return (code, redirect_uri).
+
+    If config_id is set, Meta's Facebook Login for Business flow is used:
+    permissions are defined server-side by the configuration and the
+    scope= parameter is dropped. Otherwise the classic scope= flow runs.
+    """
     state = pysecrets.token_urlsafe(16)
     server = HTTPServer(("127.0.0.1", 0), _CallbackHandler)
     redirect_uri = f"http://127.0.0.1:{server.server_port}"
@@ -259,9 +259,13 @@ def _consent_code(app_id: str, scopes: list[str]) -> tuple[str, str]:
         "client_id": app_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": ",".join(scopes),
         "state": state,
+        "auth_type": "rerequest",
     }
+    if config_id:
+        params["config_id"] = config_id
+    else:
+        params["scope"] = ",".join(scopes)
     url = f"{FB_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
     print("Opening browser for Facebook consent (or open this URL yourself):")
@@ -593,13 +597,18 @@ def connect_remote(
         }
     )
 
+    config_id = config.get("meta_business_login_config_id", "")
     consent_params = {
         "client_id": creds["app_id"],
         "redirect_uri": callback,
         "response_type": "code",
-        "scope": ",".join(scopes),
         "state": state,
+        "auth_type": "rerequest",
     }
+    if config_id:
+        consent_params["config_id"] = config_id
+    else:
+        consent_params["scope"] = ",".join(scopes)
     consent_url = f"{FB_AUTH_URL}?{urllib.parse.urlencode(consent_params)}"
 
     print("Open this URL in a browser (any device) to authorize:")
