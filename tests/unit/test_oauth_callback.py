@@ -188,6 +188,18 @@ def test_meta_error_query_param_updates_state_without_touching_meta(oauth):
     assert "access_denied" in row["message"]
 
 
+def test_error_page_escapes_meta_controlled_message(oauth):
+    # The Function URL is publicly reachable, and Meta's error_description is
+    # attacker-controllable in a crafted URL; it must not land in HTML unescaped.
+    client, _ = oauth
+    _write_state("xss")
+    payload = "<script>alert(1)</script>"
+    resp = client.get("/callback", params={"state": "xss", "error": payload})
+    assert resp.status_code == 400
+    assert "<script>alert(1)</script>" not in resp.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in resp.text
+
+
 def test_replay_is_rejected(oauth, monkeypatch):
     client, module = oauth
     _write_state("once")

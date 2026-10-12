@@ -14,6 +14,7 @@ dialog. Each state is single-use: the first callback marks the record
 the same state returns a short error page without touching the record.
 """
 
+import html
 import json
 import logging
 import os
@@ -105,13 +106,18 @@ PAGE_SCOPES = {
 
 
 def _success_page(aliases: list[str]) -> str:
-    body = "<li>" + "</li><li>".join(aliases) + "</li>" if aliases else "<li>(none)</li>"
+    # Aliases round-trip through the state record; escape them before HTML.
+    items = (
+        "<li>" + "</li><li>".join(html.escape(a) for a in aliases) + "</li>"
+        if aliases
+        else "<li>(none)</li>"
+    )
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<title>social-mcp: connected</title></head><body>"
         "<h1>Authorization complete</h1>"
         "<p>You can close this tab. The admin CLI is picking up the result.</p>"
-        f"<p>Accounts registered:</p><ul>{body}</ul>"
+        f"<p>Accounts registered:</p><ul>{items}</ul>"
         "</body></html>"
     )
 
@@ -119,11 +125,14 @@ def _success_page(aliases: list[str]) -> str:
 def _error_page(message: str) -> str:
     # The operator sees this; the admin CLI sees the same message via the
     # state record. Keep it short and free of anything token-shaped.
+    # Escape before embedding: `message` can carry Meta's error_description
+    # verbatim, and the Function URL is publicly reachable, so a crafted
+    # query string must not be able to inject script into this page.
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<title>social-mcp: authorization failed</title></head><body>"
         "<h1>Authorization failed</h1>"
-        f"<p>{message}</p>"
+        f"<p>{html.escape(message)}</p>"
         "<p>Check your admin CLI window; it will time out shortly if "
         "nothing further happens.</p>"
         "</body></html>"
