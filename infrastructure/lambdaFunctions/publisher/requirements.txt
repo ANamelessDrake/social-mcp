@@ -1,0 +1,4 @@
+# Publisher Lambda deps. No FastMCP or uvicorn: this function is invoked
+# directly by Lambda (synchronous RequestResponse from the MCP server, or
+# EventBridge Scheduler at a scheduled time), not fronted by an HTTP server.
+httpx>=0.27

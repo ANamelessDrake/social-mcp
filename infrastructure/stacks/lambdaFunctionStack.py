@@ -1,6 +1,7 @@
 import json
 
 from aws_cdk import BundlingOptions, CfnOutput, Duration, Stack
+from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as _lambda
 from constructs import Construct
 
@@ -11,15 +12,18 @@ LWA_LAYER_VERSION = "25"
 
 
 class LambdaFunctionsStack(Stack):
-    """The MCP server Lambda behind a streaming Function URL.
+    """MCP server + Publisher (DESIGN.md section 2).
 
-    Streamable HTTP MCP needs SSE passthrough; API Gateway and ALB buffer
-    responses, so the front door is a Function URL in RESPONSE_STREAM mode
-    with Lambda Web Adapter running the ASGI app (DESIGN.md section 2).
+    The MCP server lives behind a streaming Function URL (SSE passthrough
+    requires RESPONSE_STREAM, which API Gateway and ALB break). The
+    Publisher is a plain function invoked directly, by the MCP server
+    (synchronous RequestResponse for `publish_draft`) or by EventBridge
+    Scheduler (for `schedule_draft`); it is the only path that calls
+    Meta's publish endpoints.
 
-    The Publisher Lambda lands in M2 (publishing), along with its own
-    construct for EventBridge Scheduler targets; M1 is read-only so this
-    stack has one function.
+    `schedule_group_arn` is passed in via `wire_scheduler` once
+    SchedulerStack has created the group, so the MCP server's role can
+    be narrowed to CreateSchedule / DeleteSchedule on just that group.
     """
 
     def __init__(
@@ -42,9 +46,7 @@ class LambdaFunctionsStack(Stack):
             f"arn:aws:lambda:{self.region}:{LWA_ACCOUNT}:layer:{LWA_LAYER_NAME}:{LWA_LAYER_VERSION}",
         )
 
-        # Asset root is lambdaFunctions/ so sharedModules/ can be bundled
-        # alongside the function's own code.
-        code = _lambda.Code.from_asset(
+        mcp_code = _lambda.Code.from_asset(
             "infrastructure/lambdaFunctions",
             bundling=BundlingOptions(
                 image=_lambda.Runtime.PYTHON_3_12.bundling_image,
@@ -53,8 +55,6 @@ class LambdaFunctionsStack(Stack):
                     "-c",
                     " && ".join(
                         [
-                            # The function is arm64 but the bundling container
-                            # matches the host, so pin pip to aarch64 wheels.
                             "pip install -r mcpServer/requirements.txt -t /asset-output"
                             " --platform manylinux2014_aarch64 --implementation cp"
                             " --python-version 3.12 --only-binary=:all:",
@@ -67,8 +67,26 @@ class LambdaFunctionsStack(Stack):
             ),
         )
 
-        # Static account roster (alias, provider, publish settings); dynamic
-        # state (tokens, scopes, status) lives in the core table.
+        publisher_code = _lambda.Code.from_asset(
+            "infrastructure/lambdaFunctions",
+            bundling=BundlingOptions(
+                image=_lambda.Runtime.PYTHON_3_12.bundling_image,
+                command=[
+                    "bash",
+                    "-c",
+                    " && ".join(
+                        [
+                            "pip install -r publisher/requirements.txt -t /asset-output"
+                            " --platform manylinux2014_aarch64 --implementation cp"
+                            " --python-version 3.12 --only-binary=:all:",
+                            "cp -r publisher/. /asset-output/",
+                            "cp -r sharedModules /asset-output/sharedModules",
+                        ]
+                    ),
+                ],
+            ),
+        )
+
         accounts_env = json.dumps(
             [
                 {
@@ -83,6 +101,31 @@ class LambdaFunctionsStack(Stack):
             ]
         )
 
+        shared_env = {
+            "CORE_TABLE": database.core_table.table_name,
+            "TOKEN_KMS_KEY_ID": database.token_key.key_arn,
+            "META_APP_SECRET": secrets.meta_app.secret_name,
+            "ACCOUNTS": accounts_env,
+            "PUBLISHING_ENABLED": str(config.get("publishing_enabled", False)).lower(),
+        }
+
+        self.publisher = _lambda.Function(
+            self,
+            "Publisher",
+            function_name=f"{env_project}-publisher",
+            description="Posts approved drafts to Meta (DESIGN.md section 2)",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            architecture=_lambda.Architecture.ARM_64,
+            handler="app.handler",
+            code=publisher_code,
+            memory_size=512,
+            timeout=Duration.seconds(300),
+            environment=shared_env,
+        )
+        secrets.meta_app.grant_read(self.publisher)
+        database.core_table.grant_read_write_data(self.publisher)
+        database.token_key.grant_encrypt_decrypt(self.publisher)
+
         self.mcp_function = _lambda.Function(
             self,
             "McpServer",
@@ -91,38 +134,30 @@ class LambdaFunctionsStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_12,
             architecture=_lambda.Architecture.ARM_64,
             handler="run.sh",
-            code=code,
+            code=mcp_code,
             layers=[lwa_layer],
             memory_size=512,
             timeout=Duration.seconds(120),
             environment={
                 "AWS_LAMBDA_EXEC_WRAPPER": "/opt/bootstrap",
                 "AWS_LWA_INVOKE_MODE": "response_stream",
-                # Default is "/", which has no route and which the source-IP
-                # allowlist refuses (the probe comes from inside the container).
-                # /health is public by design and returns 200.
                 "AWS_LWA_READINESS_CHECK_PATH": "/health",
                 "PORT": "8000",
                 "BEARER_TOKEN_SECRET": secrets.bearer_token.secret_name,
-                "META_APP_SECRET": secrets.meta_app.secret_name,
-                "CORE_TABLE": database.core_table.table_name,
-                "TOKEN_KMS_KEY_ID": database.token_key.key_arn,
-                "ACCOUNTS": accounts_env,
-                "PUBLISHING_ENABLED": str(config.get("publishing_enabled", False)).lower(),
-                # DNS names whose current IPs may call the server (empty = open).
-                # A DDNS record here pins access to the operator's network.
+                "PUBLISHER_FUNCTION_ARN": self.publisher.function_arn,
                 "ALLOWED_CLIENT_HOSTNAMES": ",".join(
                     config.get("allowed_client_hostnames", [])
                 ),
+                **shared_env,
             },
         )
-
         secrets.bearer_token.grant_read(self.mcp_function)
         secrets.meta_app.grant_read(self.mcp_function)
         database.core_table.grant_read_write_data(self.mcp_function)
-        # Decrypt tokens at call time; encrypt rotated tokens for persistence
-        # (DESIGN.md section 3.4).
         database.token_key.grant_encrypt_decrypt(self.mcp_function)
+
+        # MCP server invokes the Publisher synchronously for publish_draft
+        self.publisher.grant_invoke(self.mcp_function)
 
         self.function_url = self.mcp_function.add_function_url(
             auth_type=_lambda.FunctionUrlAuthType.NONE,
@@ -135,3 +170,38 @@ class LambdaFunctionsStack(Stack):
             value=f"{self.function_url.url}mcp",
             description="MCP endpoint URL for client configuration",
         )
+
+    def wire_scheduler(
+        self,
+        *,
+        schedule_group_name: str,
+        schedule_group_arn: str,
+        scheduler_role_arn: str,
+    ) -> None:
+        """Grant the MCP server rights to create and delete schedules in the group.
+
+        Called from `bin/app.py` after `SchedulerStack` creates the group,
+        so the schedule group ARN is resolvable. The permission is scoped
+        to the single group this deployment uses.
+        """
+        self.mcp_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "scheduler:CreateSchedule",
+                    "scheduler:DeleteSchedule",
+                    "scheduler:GetSchedule",
+                    "scheduler:UpdateSchedule",
+                ],
+                # Schedule ARNs are schedule-group/{group}/{schedule_name}
+                resources=[f"{schedule_group_arn.replace('schedule-group/', 'schedule/')}/*"],
+            )
+        )
+        self.mcp_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[scheduler_role_arn],
+                conditions={"StringEquals": {"iam:PassedToService": "scheduler.amazonaws.com"}},
+            )
+        )
+        self.mcp_function.add_environment("SCHEDULE_GROUP_NAME", schedule_group_name)
+        self.mcp_function.add_environment("SCHEDULER_ROLE_ARN", scheduler_role_arn)

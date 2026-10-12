@@ -8,6 +8,11 @@ from sharedModules.errors import AccountError, CapabilityError
 from sharedModules.providers import get_provider
 from sharedModules.registry import resolve_alias
 
+# One module-level constant so draft_post, publish_draft, schedule_draft, and
+# admin.py approve agree on the string.
+PUBLISH_SCOPE = "publish"
+SCHEDULE_SCOPE = "schedule"
+
 
 def serialize(obj) -> dict:
     return asdict(obj)

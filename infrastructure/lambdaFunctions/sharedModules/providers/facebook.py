@@ -7,11 +7,12 @@ NotImplementedError so a tool-level accident fails loudly rather than
 silently calling a stub.
 """
 
+import json
 import logging
 
 from sharedModules import crypto, dynamo, registry
 from sharedModules.errors import AccountError, CapabilityError
-from sharedModules.models import Comment, Insights, Post, PostSummary
+from sharedModules.models import Comment, Insights, Post, PostSummary, PublishResult
 
 from .base import Capability, ProviderLimits
 from .metaClient import GraphClient
@@ -128,8 +129,54 @@ class FacebookProvider:
 
     # ---------- write ops (M2) ----------
 
-    def publish(self, draft, account) -> dict:  # pragma: no cover - M2
-        raise NotImplementedError("Facebook publish lands in milestone 2")
+    def publish(self, draft) -> PublishResult:
+        """Publish a draft to the Page.
+
+        Kind-specific helpers each return the Meta-native post id; this
+        method composes the permalink and the unified `PublishResult`.
+        Scheduling is deliberately NOT delegated to Meta (DESIGN.md
+        section 7.3): a draft carrying a future `schedule` is still
+        published immediately when this method is called, because the
+        Publisher Lambda is itself invoked at the scheduled moment by
+        EventBridge Scheduler, which gives us a second approval re-check
+        at publish time.
+        """
+        kind = (getattr(draft, "kind", "") or "").lower()
+        record = registry.account_record(self.alias)
+        page_id = record["account_id"]
+        if not page_id:
+            raise AccountError(
+                f"account '{self.alias}' is not connected; "
+                f"run `python scripts/admin.py connect --alias {self.alias}`"
+            )
+
+        if kind == "text":
+            post_id = self._publish_text(page_id, draft)
+        elif kind == "link":
+            post_id = self._publish_link(page_id, draft)
+        elif kind == "image":
+            post_id = self._publish_photo(page_id, draft)
+        elif kind == "multi_image":
+            post_id = self._publish_multi_photo(page_id, draft)
+        elif kind == "video":
+            post_id = self._publish_video(page_id, draft)
+        elif kind == "reel":
+            raise NotImplementedError(
+                "Facebook reel publishing lands in a later milestone "
+                "(requires the resumable upload API on rupload.facebook.com)"
+            )
+        else:
+            raise CapabilityError(
+                f"kind '{kind}' is not supported on facebook; "
+                "use text, link, image, multi_image, or video"
+            )
+
+        return PublishResult(
+            account=self.alias,
+            post_id=post_id,
+            permalink=f"https://www.facebook.com/{post_id}",
+            kind=kind,
+        )
 
     def edit(self, post_id: str, patch: dict) -> None:  # pragma: no cover - M3
         raise NotImplementedError("Facebook edit lands in milestone 3")
@@ -142,6 +189,78 @@ class FacebookProvider:
 
     def hide_comment(self, comment_id: str) -> None:  # pragma: no cover - M3
         raise NotImplementedError("hide_comment lands in milestone 3")
+
+    # ---------- publish helpers ----------
+
+    def _publish_text(self, page_id: str, draft) -> str:
+        resp = self._client.post(
+            f"/{page_id}/feed",
+            data={"message": getattr(draft, "text", "") or ""},
+        )
+        return str(resp.get("id") or resp.get("post_id") or "")
+
+    def _publish_link(self, page_id: str, draft) -> str:
+        resp = self._client.post(
+            f"/{page_id}/feed",
+            data={
+                "message": getattr(draft, "text", "") or "",
+                "link": getattr(draft, "link", "") or "",
+            },
+        )
+        return str(resp.get("id") or resp.get("post_id") or "")
+
+    def _publish_photo(self, page_id: str, draft) -> str:
+        urls = _media_urls(draft)
+        if not urls:
+            raise AccountError("image draft has no media url")
+        resp = self._client.post(
+            f"/{page_id}/photos",
+            data={
+                "url": urls[0],
+                "caption": getattr(draft, "text", "") or "",
+            },
+        )
+        # /PAGE/photos returns {"id": "<photo_id>", "post_id": "<page_id>_<post_id>"}
+        return str(resp.get("post_id") or resp.get("id") or "")
+
+    def _publish_multi_photo(self, page_id: str, draft) -> str:
+        urls = _media_urls(draft)
+        if len(urls) < 2:
+            raise AccountError("multi_image needs at least two media urls")
+        attached: list[dict] = []
+        for url in urls:
+            child = self._client.post(
+                f"/{page_id}/photos",
+                data={"url": url, "published": "false"},
+            )
+            fbid = str(child.get("id") or "")
+            if not fbid:
+                raise AccountError("Meta returned no photo id for a multi-photo child")
+            attached.append({"media_fbid": fbid})
+        resp = self._client.post(
+            f"/{page_id}/feed",
+            data={
+                "message": getattr(draft, "text", "") or "",
+                # Graph accepts `attached_media[0]`, `attached_media[1]`, ...
+                # as repeated form fields, which httpx encodes from a list:
+                "attached_media": json.dumps(attached),
+            },
+        )
+        return str(resp.get("id") or resp.get("post_id") or "")
+
+    def _publish_video(self, page_id: str, draft) -> str:
+        urls = _media_urls(draft)
+        if not urls:
+            raise AccountError("video draft has no media url")
+        resp = self._client.post(
+            f"/{page_id}/videos",
+            data={
+                "file_url": urls[0],
+                "description": getattr(draft, "text", "") or "",
+            },
+        )
+        # /PAGE/videos returns {"id": "<video_id>"}
+        return str(resp.get("id") or "")
 
     # ---------- token plumbing ----------
 
@@ -201,6 +320,32 @@ class FacebookProvider:
 
 
 # ---------- module-level pure helpers (unit-testable without HTTP) ----------
+
+
+def _media_urls(draft) -> list[str]:
+    """Pull https URLs from a draft's media list.
+
+    M2 accepts https URLs that Meta fetches directly; S3 staging and
+    presigned URLs land with Instagram publishing in M5 (DESIGN.md 9).
+    """
+    urls: list[str] = []
+    for m in getattr(draft, "media", []) or []:
+        if hasattr(m, "key"):
+            key = getattr(m, "key", "") or ""
+            source = getattr(m, "source", "url")
+        elif isinstance(m, dict):
+            key = m.get("key", "") or m.get("url", "")
+            source = m.get("source", "url")
+        else:
+            key = str(m)
+            source = "url"
+        if source != "url" or not key.startswith("https://"):
+            raise CapabilityError(
+                "facebook publish accepts only https media URLs in M2; "
+                "S3 staging lands with Instagram publishing in M5"
+            )
+        urls.append(key)
+    return urls
 
 
 def _kind_from_attachments(item: dict, attachments: list[dict]) -> str:

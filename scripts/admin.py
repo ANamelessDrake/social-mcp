@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 """Operator CLI for a social-mcp deployment.
 
-    python scripts/admin.py connect --env dev --alias main-page [--profile NAME]
-    python scripts/admin.py list-accounts --env dev [--profile NAME]
+    # Connect a Page (and its linked IG account) once, up-front
+    python scripts/admin.py connect --env dev --alias main-page [--scopes publish]
 
-    # M2+ (not yet implemented in M1)
+    # Inspect
+    python scripts/admin.py list-accounts --env dev
+    python scripts/admin.py list-drafts --env dev [--account main-page]
+    python scripts/admin.py show --env dev --draft-id <id>
+    python scripts/admin.py audit --env dev [--account main-page] [--since 2026-10-10]
+
+    # Approve / reject a draft (manual publish_mode); only path that writes
+    # an approval record for `publish_draft`.
     python scripts/admin.py approve --env dev --draft-id <id>
     python scripts/admin.py reject --env dev --draft-id <id>
+
+    # Global kill switch (DESIGN.md section 7.6); disables publishing on
+    # every account in the deployment regardless of per-account publish_mode.
     python scripts/admin.py disable-publishing --env dev
-    python scripts/admin.py audit --env dev --account main-page
+    python scripts/admin.py disable-publishing --env dev --enable
 
 connect runs the Facebook Login browser consent against a loopback redirect
 on this machine, exchanges the short-lived token for a long-lived one,
@@ -22,25 +32,34 @@ code never leaves this machine.
 """
 
 import argparse
+import getpass
+import hashlib
+import hmac
 import json
 import secrets as pysecrets
+import socket
 import sys
 import urllib.parse
 import urllib.request
 import webbrowser
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import boto3
 
 ROOT = Path(__file__).resolve().parents[1]
+# Add sharedModules to sys.path so admin.py reuses the server's hashing
+# and canonical JSON implementation. One source of truth for the hash.
+sys.path.insert(0, str(ROOT / "infrastructure" / "lambdaFunctions"))
 
 GRAPH_API_VERSION = "v26.0"
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 FB_AUTH_URL = "https://www.facebook.com/{v}/dialog/oauth".format(v=GRAPH_API_VERSION)
 
-# M1 scopes: read-only Pages. publish_video, pages_manage_posts and the
-# engagement scopes land with M2 (`--scopes publish`) and M3.
+# Scopes bundle per capability tier. M3 engagement scopes land with that
+# milestone; M1 and M2 are listed here so `--scopes publish` upgrades a
+# previously read-only connection without re-reading the docs.
 PAGE_SCOPES = {
     "readonly": [
         "pages_show_list",
@@ -49,6 +68,17 @@ PAGE_SCOPES = {
         "read_insights",
         "business_management",
         "public_profile",
+    ],
+    "publish": [
+        "pages_show_list",
+        "pages_read_engagement",
+        "pages_read_user_content",
+        "read_insights",
+        "business_management",
+        "public_profile",
+        # M2 additions:
+        "pages_manage_posts",
+        "publish_video",
     ],
 }
 
@@ -208,7 +238,7 @@ def connect(config: dict, session, alias: str) -> None:
 
     prefix = _secret_prefix(config)
     creds = _meta_app_creds(session, prefix)
-    scopes = PAGE_SCOPES["readonly"]
+    scopes = PAGE_SCOPES.get(_SCOPE_CHOICE, PAGE_SCOPES["readonly"])
 
     code, redirect_uri = _consent_code(creds["app_id"], scopes)
     short = _exchange_code(creds, code, redirect_uri)
@@ -318,19 +348,307 @@ def list_accounts_cli(config: dict, session) -> None:
     for entry in config.get("accounts", []):
         alias = entry["alias"]
         item = table.get_item(Key={"PK": f"ACCOUNT#{alias}", "SK": "META"}).get("Item")
+        mode = entry.get("publish_mode", "manual")
         if item is None:
-            print(f"{alias} ({entry['provider']}): not connected")
+            print(f"{alias} ({entry['provider']}, mode={mode}): not connected")
             continue
         scopes = ", ".join(item.get("scopes", []))
         print(
-            f"{alias} ({item['provider']}): {item.get('status', 'active')} "
+            f"{alias} ({item['provider']}, mode={mode}): {item.get('status', 'active')} "
             f"name={item.get('display_name', '')} id={item.get('account_id', '')} "
             f"scopes=[{scopes}]"
         )
 
 
-def _not_yet_implemented(name: str) -> None:
-    print(f"'{name}' is not yet implemented in M1; lands with M2 (publishing).")
+# -------------------------------- M2 subcommands --------------------------------
+
+
+def _canonical_hash(draft: dict) -> str:
+    """Mirror sharedModules/approval.py's hash_draft for the operator CLI.
+
+    Imported from the server package when available; this fallback keeps
+    the CLI runnable without the full lambda bundle on sys.path.
+    """
+    try:
+        from types import SimpleNamespace
+
+        from sharedModules.approval import hash_draft  # type: ignore
+
+        return hash_draft(
+            SimpleNamespace(
+                account=draft.get("account", ""),
+                kind=draft.get("kind", ""),
+                text=draft.get("text", "") or "",
+                link=draft.get("link", "") or "",
+                media=draft.get("media", []) or [],
+                schedule=draft.get("schedule", "") or "",
+            )
+        )
+    except Exception:  # noqa: BLE001 - deliberate narrow fallback
+        payload = {
+            "account": draft.get("account", ""),
+            "kind": draft.get("kind", ""),
+            "text": draft.get("text", "") or "",
+            "link": draft.get("link", "") or "",
+            "media": [
+                {"etag": m.get("etag", ""), "mime": m.get("mime", "")}
+                for m in (draft.get("media") or [])
+            ],
+            "schedule": draft.get("schedule", "") or "",
+        }
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+        return hashlib.sha256(blob).hexdigest()
+
+
+def _actor() -> str:
+    return f"{getpass.getuser()}@{socket.gethostname()}"
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _read_draft(table, draft_id: str) -> dict | None:
+    item = table.get_item(Key={"PK": f"DRAFT#{draft_id}", "SK": "META"}).get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK", "GSI1PK", "GSI1SK"}}
+
+
+def _write_draft(table, draft: dict) -> None:
+    account = draft.get("account", "unknown")
+    created_at = draft.get("created_at") or _now()
+    status = draft.get("status", "drafted")
+    table.put_item(
+        Item={
+            "PK": f"DRAFT#{draft['draft_id']}",
+            "SK": "META",
+            "GSI1PK": f"DRAFTS#{account}",
+            "GSI1SK": f"CREATED#{created_at}#{status}",
+            **draft,
+        }
+    )
+
+
+def _write_approval(table, draft_id: str, content_hash: str, actor: str, scope: str) -> None:
+    table.put_item(
+        Item={
+            "PK": f"APPROVAL#{draft_id}",
+            "SK": "META",
+            "draft_id": draft_id,
+            "content_hash": content_hash,
+            "approved_by": actor,
+            "approved_at": _now(),
+            "scope": scope,
+        }
+    )
+
+
+def _delete_approval(table, draft_id: str) -> None:
+    table.delete_item(Key={"PK": f"APPROVAL#{draft_id}", "SK": "META"})
+
+
+def _append_audit(table, row: dict) -> None:
+    account = row.get("account", "unknown")
+    ts = _now()
+    sk = f"TS#{ts}#{pysecrets.token_hex(4)}"
+    table.put_item(Item={"PK": f"AUDIT#{account}", "SK": sk, "created_at": ts, **row})
+
+
+def _mode_for(config: dict, account: str) -> tuple[str, list[str]]:
+    for entry in config.get("accounts", []):
+        if entry["alias"] == account:
+            return entry.get("publish_mode", "manual"), list(entry.get("auto_for_kinds", []))
+    return "manual", []
+
+
+def _show_preview(draft: dict, config: dict) -> None:
+    mode, auto_kinds = _mode_for(config, draft.get("account", ""))
+    print(f"draft:   {draft.get('draft_id', '')}")
+    print(f"account: {draft.get('account', '')}  (publish_mode={mode})")
+    print(f"kind:    {draft.get('kind', '')}")
+    print(f"status:  {draft.get('status', '')}")
+    print(f"created: {draft.get('created_at', '')} by {draft.get('created_by', '')}")
+    schedule = draft.get("schedule") or ""
+    if schedule:
+        print(f"schedule: {schedule}")
+    link = draft.get("link") or ""
+    if link:
+        print(f"link:    {link}")
+    media = draft.get("media") or []
+    if media:
+        print(f"media:   {len(media)} item(s)")
+    print("------- text -------")
+    print(draft.get("text", ""))
+    print("--------------------")
+    warnings = draft.get("policy_warnings") or []
+    if warnings:
+        print("policy warnings:")
+        for w in warnings:
+            print(f"  - {w}")
+    if mode == "auto":
+        print("note: this account is in auto mode; approvals are recorded by the server.")
+    elif mode == "auto_for":
+        print(f"note: this account auto-approves kinds={auto_kinds}; others need manual approval.")
+
+
+def approve_cli(config: dict, session, draft_id: str) -> None:
+    table = _table(config, session)
+    draft = _read_draft(table, draft_id)
+    if draft is None:
+        sys.exit(f"draft '{draft_id}' not found")
+
+    if draft.get("status") in ("published", "discarded"):
+        sys.exit(f"draft '{draft_id}' is {draft['status']}; cannot approve")
+
+    mode, auto_kinds = _mode_for(config, draft.get("account", ""))
+    kind = draft.get("kind", "")
+    if mode == "auto" or (mode == "auto_for" and kind in auto_kinds):
+        sys.exit(
+            f"account '{draft.get('account', '')}' auto-approves {kind} drafts; "
+            "an approval record was already written at draft time. If this draft "
+            "shows status='drafted' here, something is wrong - inspect it."
+        )
+
+    _show_preview(draft, config)
+    current = _canonical_hash(draft)
+    print(f"content_hash: {current}")
+    choice = input("\nApprove this draft for publishing? [y/N]: ").strip().lower()
+    if choice not in {"y", "yes"}:
+        print("not approved")
+        return
+
+    actor = _actor()
+    _write_approval(table, draft_id, current, actor, scope="publish")
+    _write_draft(table, {**draft, "status": "approved"})
+    _append_audit(
+        table,
+        {
+            "account": draft.get("account", "unknown"),
+            "kind": "approve",
+            "actor_identity": actor,
+            "draft_id": draft_id,
+            "result": "ok",
+        },
+    )
+    print(f"approved by {actor}")
+
+
+def reject_cli(config: dict, session, draft_id: str) -> None:
+    table = _table(config, session)
+    draft = _read_draft(table, draft_id)
+    if draft is None:
+        sys.exit(f"draft '{draft_id}' not found")
+    if draft.get("status") == "published":
+        sys.exit(f"draft '{draft_id}' is already published; cannot reject")
+    _show_preview(draft, config)
+    choice = input("\nReject (discard) this draft? [y/N]: ").strip().lower()
+    if choice not in {"y", "yes"}:
+        print("not rejected")
+        return
+    actor = _actor()
+    _delete_approval(table, draft_id)
+    _write_draft(table, {**draft, "status": "discarded"})
+    _append_audit(
+        table,
+        {
+            "account": draft.get("account", "unknown"),
+            "kind": "reject",
+            "actor_identity": actor,
+            "draft_id": draft_id,
+            "result": "ok",
+        },
+    )
+    print(f"rejected by {actor}")
+
+
+def list_drafts_cli(config: dict, session, account: str = "") -> None:
+    table = _table(config, session)
+    aliases = [account] if account else [a["alias"] for a in config.get("accounts", [])]
+    for alias in aliases:
+        resp = table.query(
+            IndexName="GSI1",
+            KeyConditionExpression="GSI1PK = :pk",
+            ExpressionAttributeValues={":pk": f"DRAFTS#{alias}"},
+            ScanIndexForward=False,
+            Limit=20,
+        )
+        for item in resp.get("Items", []):
+            text = (item.get("text", "") or "")[:60]
+            print(
+                f"[{alias}] {item.get('draft_id', '')} status={item.get('status', '')} "
+                f"kind={item.get('kind', '')} created={item.get('created_at', '')} "
+                f"text={text!r}"
+            )
+
+
+def show_cli(config: dict, session, draft_id: str) -> None:
+    table = _table(config, session)
+    draft = _read_draft(table, draft_id)
+    if draft is None:
+        sys.exit(f"draft '{draft_id}' not found")
+    _show_preview(draft, config)
+    approval = table.get_item(Key={"PK": f"APPROVAL#{draft_id}", "SK": "META"}).get("Item")
+    if approval is None:
+        print("approval: none (pending)")
+    else:
+        current = _canonical_hash(draft)
+        stored = approval.get("content_hash", "")
+        state = (
+            "approved"
+            if hmac.compare_digest(current, stored)
+            else "STALE (edited after approval)"
+        )
+        who = approval.get("approved_by", "")
+        when = approval.get("approved_at", "")
+        print(f"approval: {state} by {who} at {when}")
+
+
+def disable_publishing_cli(config: dict, session, enable: bool) -> None:
+    table = _table(config, session)
+    actor = _actor()
+    table.put_item(
+        Item={
+            "PK": "KILL#",
+            "SK": "global",
+            "disabled": not enable,
+            "set_by": actor,
+            "set_at": _now(),
+        }
+    )
+    state = "ENABLED" if enable else "DISABLED"
+    print(f"publishing globally {state} (set_by={actor})")
+
+
+def audit_cli(config: dict, session, account: str, since: str, limit: int) -> None:
+    table = _table(config, session)
+    if account:
+        kwargs = {
+            "KeyConditionExpression": "PK = :pk",
+            "ExpressionAttributeValues": {":pk": f"AUDIT#{account}"},
+            "ScanIndexForward": False,
+            "Limit": max(1, min(limit, 500)),
+        }
+        if since:
+            kwargs["KeyConditionExpression"] += " AND SK >= :sk"
+            kwargs["ExpressionAttributeValues"][":sk"] = f"TS#{since}"
+        resp = table.query(**kwargs)
+        rows = resp.get("Items", [])
+    else:
+        resp = table.scan(
+            FilterExpression="begins_with(PK, :p)",
+            ExpressionAttributeValues={":p": "AUDIT#"},
+            Limit=limit * 4,
+        )
+        rows = sorted(
+            resp.get("Items", []), key=lambda r: r.get("created_at", ""), reverse=True
+        )[:limit]
+    for row in rows:
+        print(
+            f"{row.get('created_at', '')} [{row.get('account', '')}] "
+            f"{row.get('kind', '')} by {row.get('actor_identity', '')} "
+            f"draft={row.get('draft_id', '')} result={row.get('result', '')}"
+        )
 
 
 # ----------------------------------- main -----------------------------------
@@ -340,27 +658,62 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("connect", "list-accounts", "approve", "reject", "disable-publishing", "audit"):
+    for name in (
+        "connect",
+        "list-accounts",
+        "list-drafts",
+        "show",
+        "approve",
+        "reject",
+        "disable-publishing",
+        "audit",
+    ):
         sp = sub.add_parser(name)
         sp.add_argument("--env", required=True)
         sp.add_argument("--profile", default=None)
         if name == "connect":
             sp.add_argument("--alias", required=True)
-        if name in ("approve", "reject"):
+            sp.add_argument("--scopes", default="readonly", choices=sorted(PAGE_SCOPES))
+        if name in ("approve", "reject", "show"):
             sp.add_argument("--draft-id", required=True)
+        if name == "list-drafts":
+            sp.add_argument("--account", default="")
+        if name == "disable-publishing":
+            sp.add_argument("--enable", action="store_true", help="re-enable publishing")
         if name == "audit":
-            sp.add_argument("--account", required=False, default="")
+            sp.add_argument("--account", default="")
+            sp.add_argument("--since", default="")
+            sp.add_argument("--limit", type=int, default=50)
 
     args = parser.parse_args()
     config = _load_config(args.env)
     session = _session(args.profile, config.get("region", "us-east-1"))
 
     if args.command == "connect":
+        # scopes selection only affects the consent dialog; connect() still
+        # pulls from PAGE_SCOPES by name.
+        global _SCOPE_CHOICE
+        _SCOPE_CHOICE = args.scopes
         connect(config, session, args.alias)
     elif args.command == "list-accounts":
         list_accounts_cli(config, session)
-    else:
-        _not_yet_implemented(args.command)
+    elif args.command == "list-drafts":
+        list_drafts_cli(config, session, args.account)
+    elif args.command == "show":
+        show_cli(config, session, args.draft_id)
+    elif args.command == "approve":
+        approve_cli(config, session, args.draft_id)
+    elif args.command == "reject":
+        reject_cli(config, session, args.draft_id)
+    elif args.command == "disable-publishing":
+        disable_publishing_cli(config, session, args.enable)
+    elif args.command == "audit":
+        audit_cli(config, session, args.account, args.since, args.limit)
+    else:  # pragma: no cover - argparse guards above
+        sys.exit(f"unknown command: {args.command}")
+
+
+_SCOPE_CHOICE = "readonly"
 
 
 if __name__ == "__main__":

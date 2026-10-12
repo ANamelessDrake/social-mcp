@@ -111,3 +111,33 @@ class Approval:
     approved_at: str
     # one of: publish | schedule | edit:<post_id> | reply:<comment_id> | hide:<account>
     scope: str
+
+
+@dataclass
+class AuditRow:
+    """One entry in the append-only audit log (DESIGN.md section 10).
+
+    `actor_identity` is the agent name from the bearer token on tool paths,
+    or the operator's OS user on admin CLI paths. `result` is 'ok' or
+    'error:<meta_code>'. Tokens and raw bodies never land in audit rows.
+    """
+
+    account: str
+    kind: str  # draft | approve | reject | publish | schedule | edit | delete | reply | hide
+    actor_identity: str
+    result: str = "ok"
+    draft_id: str = ""
+    post_id: str = ""
+    comment_id: str = ""
+    created_at: str = ""
+    request_ms: int = 0
+
+
+@dataclass
+class PublishResult:
+    """Return shape from Provider.publish and the Publisher Lambda."""
+
+    account: str
+    post_id: str
+    permalink: str = ""
+    kind: str = ""

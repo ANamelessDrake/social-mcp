@@ -13,6 +13,7 @@ sys.path.append(project_root)
 from infrastructure.stacks.dynamoDbStack import DynamoDbStack  # noqa: E402
 from infrastructure.stacks.lambdaFunctionStack import LambdaFunctionsStack  # noqa: E402
 from infrastructure.stacks.monitoringStack import MonitoringStack  # noqa: E402
+from infrastructure.stacks.schedulerStack import SchedulerStack  # noqa: E402
 from infrastructure.stacks.secretsStack import SecretsStack  # noqa: E402
 
 app = cdk.App()
@@ -60,11 +61,41 @@ lambda_stack = LambdaFunctionsStack(
 lambda_stack.add_dependency(secrets_stack)
 lambda_stack.add_dependency(dynamodb_stack)
 
+# The Scheduler stack creates a role whose policy names the Publisher ARN,
+# and the Lambda stack adds a policy to the MCP role naming the schedule
+# group and scheduler role. Using CDK references in both directions would
+# cycle the stacks. The function_name and schedule-group/scheduler-role
+# names are deterministic from `{env}-{project}`, so we compose the ARNs
+# as strings and break the cycle.
+publisher_arn_str = (
+    f"arn:aws:lambda:{env.region}:{env.account}:function:{env_project}-publisher"
+)
+schedule_group_name_str = f"{env_project}-publish"
+schedule_group_arn_str = (
+    f"arn:aws:scheduler:{env.region}:{env.account}:schedule-group/{schedule_group_name_str}"
+)
+scheduler_role_arn_str = f"arn:aws:iam::{env.account}:role/{env_project}-scheduler"
+
+scheduler_stack = SchedulerStack(
+    app,
+    f"{env_project}-scheduler",
+    config=config,
+    publisher_arn=publisher_arn_str,
+    env=env,
+)
+# Lambda stack only reads strings; no CDK dependency on the scheduler stack.
+lambda_stack.wire_scheduler(
+    schedule_group_name=schedule_group_name_str,
+    schedule_group_arn=schedule_group_arn_str,
+    scheduler_role_arn=scheduler_role_arn_str,
+)
+
 monitoring_stack = MonitoringStack(
     app,
     f"{env_project}-monitoring",
     config=config,
     mcp_function=lambda_stack.mcp_function,
+    publisher_function=lambda_stack.publisher,
     env=env,
 )
 monitoring_stack.add_dependency(lambda_stack)
