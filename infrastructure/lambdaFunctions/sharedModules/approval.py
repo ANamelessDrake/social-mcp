@@ -114,6 +114,129 @@ def invalidate_approval(draft_id: str) -> None:
     dynamo.delete_approval(draft_id)
 
 
+# -------------------- M3 scopes: edit / delete / reply --------------------
+#
+# Each scope's hash binds to the operator-approved payload (the staged
+# change), so the Publisher reads what was approved, not what the agent
+# re-sent. The hide scope is a *standing* per-account approval and
+# therefore has no payload hash.
+
+
+def hash_edit(text: str) -> str:
+    """Hash of a staged edit's text."""
+    blob = json.dumps({"text": text or ""}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def hash_delete(post_id: str, reason: str) -> str:
+    """Hash of a staged delete's target + reason."""
+    payload = {"post_id": post_id or "", "reason": reason or ""}
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def hash_reply(text: str) -> str:
+    """Hash of a staged reply's text."""
+    blob = json.dumps({"text": text or ""}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def record_edit_approval(post_id: str, text: str, approved_by: str) -> dict:
+    content_hash = hash_edit(text)
+    dynamo.write_approval_record(
+        key=f"edit:{post_id}",
+        content_hash=content_hash,
+        approved_by=approved_by,
+        scope=f"edit:{post_id}",
+    )
+    return {"post_id": post_id, "content_hash": content_hash}
+
+
+def record_delete_approval(post_id: str, reason: str, approved_by: str) -> dict:
+    content_hash = hash_delete(post_id, reason)
+    dynamo.write_approval_record(
+        key=f"delete:{post_id}",
+        content_hash=content_hash,
+        approved_by=approved_by,
+        scope=f"delete:{post_id}",
+        payload={"reason": reason or ""},
+    )
+    return {"post_id": post_id, "content_hash": content_hash}
+
+
+def record_reply_approval(comment_id: str, text: str, approved_by: str) -> dict:
+    content_hash = hash_reply(text)
+    dynamo.write_approval_record(
+        key=f"reply:{comment_id}",
+        content_hash=content_hash,
+        approved_by=approved_by,
+        scope=f"reply:{comment_id}",
+    )
+    return {"comment_id": comment_id, "content_hash": content_hash}
+
+
+def verify_edit_approval(post_id: str, current_text: str) -> dict:
+    approval = dynamo.read_approval_record(f"edit:{post_id}")
+    if approval is None:
+        raise ApprovalError(
+            f"edit of '{post_id}' has no approval record; "
+            f"run `python scripts/admin.py approve-edit --post-id {post_id}`"
+        )
+    current = hash_edit(current_text)
+    stored = approval.get("content_hash", "")
+    if not hmac.compare_digest(current, stored):
+        raise ApprovalError(
+            f"edit of '{post_id}' was changed after approval; "
+            f"re-run `python scripts/admin.py approve-edit --post-id {post_id}`"
+        )
+    return approval
+
+
+def verify_delete_approval(post_id: str, current_reason: str) -> dict:
+    approval = dynamo.read_approval_record(f"delete:{post_id}")
+    if approval is None:
+        raise ApprovalError(
+            f"delete of '{post_id}' has no approval record; "
+            f"run `python scripts/admin.py approve-delete --post-id {post_id}`"
+        )
+    current = hash_delete(post_id, current_reason)
+    stored = approval.get("content_hash", "")
+    if not hmac.compare_digest(current, stored):
+        raise ApprovalError(
+            f"delete of '{post_id}' was changed after approval; "
+            f"re-run `python scripts/admin.py approve-delete --post-id {post_id}`"
+        )
+    return approval
+
+
+def verify_reply_approval(comment_id: str, current_text: str) -> dict:
+    approval = dynamo.read_approval_record(f"reply:{comment_id}")
+    if approval is None:
+        raise ApprovalError(
+            f"reply to '{comment_id}' has no approval record; "
+            f"run `python scripts/admin.py approve-reply --comment-id {comment_id}`"
+        )
+    current = hash_reply(current_text)
+    stored = approval.get("content_hash", "")
+    if not hmac.compare_digest(current, stored):
+        raise ApprovalError(
+            f"reply to '{comment_id}' was changed after approval; "
+            f"re-run `python scripts/admin.py approve-reply --comment-id {comment_id}`"
+        )
+    return approval
+
+
+def verify_hide_approval(account: str) -> dict:
+    """The hide scope is a standing per-account approval."""
+    standing = dynamo.read_hide_standing(account)
+    if standing is None:
+        raise ApprovalError(
+            f"account '{account}' has no standing hide approval; "
+            f"run `python scripts/admin.py approve-hide --account {account}`"
+        )
+    return standing
+
+
 def _hash_item(draft) -> str:
     """Hash a draft dict (as it comes from Dynamo) or a Draft dataclass."""
     if hasattr(draft, "__dataclass_fields__"):

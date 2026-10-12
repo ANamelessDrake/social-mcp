@@ -2,7 +2,8 @@
 """Operator CLI for a social-mcp deployment.
 
     # Connect a Page (and its linked IG account) once, up-front
-    python scripts/admin.py connect --env dev --alias main-page [--scopes publish]
+    python scripts/admin.py connect --env dev --alias main-page \\
+        [--scopes publish|engagement]
 
     # Inspect
     python scripts/admin.py list-accounts --env dev
@@ -13,7 +14,22 @@
     # Approve / reject a draft (manual publish_mode); only path that writes
     # an approval record for `publish_draft`.
     python scripts/admin.py approve --env dev --draft-id <id>
-    python scripts/admin.py reject --env dev --draft-id <id>
+    python scripts/admin.py reject --env dev --kind draft --draft-id <id>
+
+    # M3: per-item approvals for the live-touching verbs. edit, delete,
+    # reply approvals carry the operator-approved payload hash; hide is
+    # a standing per-account approval that covers queued hide requests
+    # and future ones on the same account.
+    python scripts/admin.py approve-edit --env dev --post-id <id>
+    python scripts/admin.py approve-delete --env dev --post-id <id>
+    python scripts/admin.py approve-reply --env dev --comment-id <id>
+    python scripts/admin.py approve-hide --env dev --account main-page [--revoke]
+
+    python scripts/admin.py reject --env dev --kind edit --post-id <id>
+    python scripts/admin.py reject --env dev --kind delete --post-id <id>
+    python scripts/admin.py reject --env dev --kind reply --comment-id <id>
+    python scripts/admin.py reject --env dev --kind hide-request \\
+        --account main-page --comment-id <id>
 
     # Global kill switch (DESIGN.md section 7.6); disables publishing on
     # every account in the deployment regardless of per-account publish_mode.
@@ -79,6 +95,18 @@ PAGE_SCOPES = {
         # M2 additions:
         "pages_manage_posts",
         "publish_video",
+    ],
+    "engagement": [
+        "pages_show_list",
+        "pages_read_engagement",
+        "pages_read_user_content",
+        "read_insights",
+        "business_management",
+        "public_profile",
+        "pages_manage_posts",
+        "publish_video",
+        # M3 addition:
+        "pages_manage_engagement",
     ],
 }
 
@@ -620,6 +648,315 @@ def disable_publishing_cli(config: dict, session, enable: bool) -> None:
     print(f"publishing globally {state} (set_by={actor})")
 
 
+# -------------------------------- M3 subcommands --------------------------------
+
+
+def _publisher_function_name(config: dict) -> str:
+    return f"{config['environment_name']}-{config['project_name']}-publisher"
+
+
+def _invoke_publisher(config: dict, session, payload: dict) -> dict:
+    """Fire the Publisher Lambda from the operator machine. Admin CLI only."""
+    client = session.client("lambda")
+    name = _publisher_function_name(config)
+    resp = client.invoke(
+        FunctionName=name,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(payload).encode(),
+    )
+    body = resp.get("Payload").read().decode() if resp.get("Payload") else "{}"
+    try:
+        return json.loads(body)
+    except ValueError:
+        return {"ok": False, "error": "publisher returned invalid JSON"}
+
+
+def _read_staged_edit(table, post_id: str) -> dict | None:
+    item = table.get_item(Key={"PK": f"EDIT#{post_id}", "SK": "META"}).get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def _read_staged_delete(table, post_id: str) -> dict | None:
+    item = table.get_item(Key={"PK": f"DELETE#{post_id}", "SK": "META"}).get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def _read_staged_reply(table, comment_id: str) -> dict | None:
+    item = table.get_item(Key={"PK": f"REPLY#{comment_id}", "SK": "META"}).get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def _hash_edit(text: str) -> str:
+    blob = json.dumps({"text": text or ""}, sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _hash_delete(post_id: str, reason: str) -> str:
+    payload = {"post_id": post_id or "", "reason": reason or ""}
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _hash_reply(text: str) -> str:
+    return _hash_edit(text)
+
+
+def _write_item_approval(
+    table, *, key: str, content_hash: str, scope: str, actor: str, payload: dict | None = None
+) -> None:
+    item = {
+        "PK": f"APPROVAL#{key}",
+        "SK": "META",
+        "approval_key": key,
+        "content_hash": content_hash,
+        "approved_by": actor,
+        "approved_at": _now(),
+        "scope": scope,
+    }
+    if payload:
+        item["payload"] = payload
+    table.put_item(Item=item)
+
+
+def approve_edit_cli(config: dict, session, post_id: str) -> None:
+    table = _table(config, session)
+    staged = _read_staged_edit(table, post_id)
+    if staged is None:
+        sys.exit(
+            f"no staged edit for post '{post_id}'; "
+            "the agent must call edit_post first"
+        )
+    text = staged.get("text", "") or ""
+    account = staged.get("account", "")
+    print(f"account: {account}")
+    print(f"post:    {post_id}")
+    print("------- new text -------")
+    print(text)
+    print("------------------------")
+    choice = input("\nApprove this edit? [y/N]: ").strip().lower()
+    if choice not in {"y", "yes"}:
+        print("not approved")
+        return
+    actor = _actor()
+    content_hash = _hash_edit(text)
+    _write_item_approval(
+        table,
+        key=f"edit:{post_id}",
+        content_hash=content_hash,
+        scope=f"edit:{post_id}",
+        actor=actor,
+    )
+    result = _invoke_publisher(
+        config, session, {"kind": "edit", "post_id": post_id, "actor": actor}
+    )
+    print(f"publisher: {json.dumps(result)}")
+
+
+def approve_delete_cli(config: dict, session, post_id: str) -> None:
+    table = _table(config, session)
+    staged = _read_staged_delete(table, post_id)
+    if staged is None:
+        sys.exit(
+            f"no staged delete for post '{post_id}'; "
+            "the agent must call delete_post first"
+        )
+    account = staged.get("account", "")
+    reason = staged.get("reason", "") or ""
+    print(f"account: {account}")
+    print(f"post:    {post_id}")
+    if reason:
+        print(f"reason:  {reason}")
+    choice = input("\nApprove this delete? [y/N]: ").strip().lower()
+    if choice not in {"y", "yes"}:
+        print("not approved")
+        return
+    actor = _actor()
+    content_hash = _hash_delete(post_id, reason)
+    _write_item_approval(
+        table,
+        key=f"delete:{post_id}",
+        content_hash=content_hash,
+        scope=f"delete:{post_id}",
+        actor=actor,
+        payload={"reason": reason},
+    )
+    result = _invoke_publisher(
+        config, session, {"kind": "delete", "post_id": post_id, "actor": actor}
+    )
+    print(f"publisher: {json.dumps(result)}")
+
+
+def approve_reply_cli(config: dict, session, comment_id: str) -> None:
+    table = _table(config, session)
+    staged = _read_staged_reply(table, comment_id)
+    if staged is None:
+        sys.exit(
+            f"no staged reply for comment '{comment_id}'; "
+            "the agent must call reply_to_comment first"
+        )
+    text = staged.get("text", "") or ""
+    account = staged.get("account", "")
+    print(f"account:   {account}")
+    print(f"replying to comment: {comment_id}")
+    print("------- reply text -------")
+    print(text)
+    print("--------------------------")
+    choice = input("\nApprove this reply? [y/N]: ").strip().lower()
+    if choice not in {"y", "yes"}:
+        print("not approved")
+        return
+    actor = _actor()
+    content_hash = _hash_reply(text)
+    _write_item_approval(
+        table,
+        key=f"reply:{comment_id}",
+        content_hash=content_hash,
+        scope=f"reply:{comment_id}",
+        actor=actor,
+    )
+    result = _invoke_publisher(
+        config, session, {"kind": "reply", "comment_id": comment_id, "actor": actor}
+    )
+    print(f"publisher: {json.dumps(result)}")
+
+
+def approve_hide_cli(config: dict, session, account: str, revoke: bool) -> None:
+    """Standing per-account hide approval.
+
+    Without --revoke: writes the HIDE#<account> item, then sweeps every
+    queued HIDE_REQUEST#<account> item (one Publisher invoke per
+    comment, one audit row per hide).
+
+    With --revoke: deletes the standing approval. Queued requests stay
+    queued; future hide_comment calls go back to the "needs approval"
+    path.
+    """
+    table = _table(config, session)
+    actor = _actor()
+    if revoke:
+        table.delete_item(Key={"PK": f"HIDE#{account}", "SK": "META"})
+        print(f"standing hide approval revoked for '{account}' by {actor}")
+        return
+    table.put_item(
+        Item={
+            "PK": f"HIDE#{account}",
+            "SK": "META",
+            "account": account,
+            "approved_by": actor,
+            "approved_at": _now(),
+        }
+    )
+    print(f"standing hide approval granted for '{account}' by {actor}")
+
+    # Sweep queued requests
+    resp = table.query(
+        KeyConditionExpression="PK = :pk",
+        ExpressionAttributeValues={":pk": f"HIDE_REQUEST#{account}"},
+    )
+    pending = resp.get("Items", [])
+    if not pending:
+        print("no queued hide requests")
+        return
+    print(f"processing {len(pending)} queued hide request(s)...")
+    for req in pending:
+        comment_id = req.get("comment_id") or req.get("SK", "")
+        result = _invoke_publisher(
+            config,
+            session,
+            {"kind": "hide", "account": account, "comment_id": comment_id, "actor": actor},
+        )
+        print(f"  {comment_id}: {result.get('ok', False)} {result.get('error', '')}")
+
+
+def reject_cli_multi(config: dict, session, kind: str, args) -> None:
+    """Reject any staged change by kind: draft | edit | delete | reply | hide-request."""
+    table = _table(config, session)
+    actor = _actor()
+    if kind == "draft":
+        return reject_cli(config, session, args.draft_id)
+    if kind == "edit":
+        post_id = args.post_id
+        if not post_id:
+            sys.exit("--post-id is required for `reject --kind edit`")
+        table.delete_item(Key={"PK": f"EDIT#{post_id}", "SK": "META"})
+        table.delete_item(Key={"PK": f"APPROVAL#edit:{post_id}", "SK": "META"})
+        _append_audit(
+            table,
+            {
+                "account": "unknown",
+                "kind": "edit",
+                "actor_identity": actor,
+                "post_id": post_id,
+                "result": "rejected",
+            },
+        )
+        print(f"rejected staged edit for post '{post_id}' by {actor}")
+        return
+    if kind == "delete":
+        post_id = args.post_id
+        if not post_id:
+            sys.exit("--post-id is required for `reject --kind delete`")
+        table.delete_item(Key={"PK": f"DELETE#{post_id}", "SK": "META"})
+        table.delete_item(Key={"PK": f"APPROVAL#delete:{post_id}", "SK": "META"})
+        _append_audit(
+            table,
+            {
+                "account": "unknown",
+                "kind": "delete",
+                "actor_identity": actor,
+                "post_id": post_id,
+                "result": "rejected",
+            },
+        )
+        print(f"rejected staged delete for post '{post_id}' by {actor}")
+        return
+    if kind == "reply":
+        comment_id = args.comment_id
+        if not comment_id:
+            sys.exit("--comment-id is required for `reject --kind reply`")
+        table.delete_item(Key={"PK": f"REPLY#{comment_id}", "SK": "META"})
+        table.delete_item(Key={"PK": f"APPROVAL#reply:{comment_id}", "SK": "META"})
+        _append_audit(
+            table,
+            {
+                "account": "unknown",
+                "kind": "reply",
+                "actor_identity": actor,
+                "comment_id": comment_id,
+                "result": "rejected",
+            },
+        )
+        print(f"rejected staged reply for comment '{comment_id}' by {actor}")
+        return
+    if kind == "hide-request":
+        account = args.account
+        comment_id = args.comment_id
+        if not (account and comment_id):
+            sys.exit(
+                "--account and --comment-id are required for `reject --kind hide-request`"
+            )
+        table.delete_item(Key={"PK": f"HIDE_REQUEST#{account}", "SK": comment_id})
+        _append_audit(
+            table,
+            {
+                "account": account,
+                "kind": "hide",
+                "actor_identity": actor,
+                "comment_id": comment_id,
+                "result": "rejected",
+            },
+        )
+        print(f"rejected queued hide request for '{account}' / '{comment_id}' by {actor}")
+        return
+    sys.exit(f"unknown reject kind: {kind}")
+
+
 def audit_cli(config: dict, session, account: str, since: str, limit: int) -> None:
     table = _table(config, session)
     if account:
@@ -665,6 +1002,10 @@ def main() -> None:
         "show",
         "approve",
         "reject",
+        "approve-edit",
+        "approve-delete",
+        "approve-reply",
+        "approve-hide",
         "disable-publishing",
         "audit",
     ):
@@ -674,8 +1015,25 @@ def main() -> None:
         if name == "connect":
             sp.add_argument("--alias", required=True)
             sp.add_argument("--scopes", default="readonly", choices=sorted(PAGE_SCOPES))
-        if name in ("approve", "reject", "show"):
+        if name in ("approve", "show"):
             sp.add_argument("--draft-id", required=True)
+        if name == "reject":
+            sp.add_argument(
+                "--kind",
+                default="draft",
+                choices=("draft", "edit", "delete", "reply", "hide-request"),
+            )
+            sp.add_argument("--draft-id", default="")
+            sp.add_argument("--post-id", default="")
+            sp.add_argument("--comment-id", default="")
+            sp.add_argument("--account", default="")
+        if name in ("approve-edit", "approve-delete"):
+            sp.add_argument("--post-id", required=True)
+        if name == "approve-reply":
+            sp.add_argument("--comment-id", required=True)
+        if name == "approve-hide":
+            sp.add_argument("--account", required=True)
+            sp.add_argument("--revoke", action="store_true", help="revoke the standing approval")
         if name == "list-drafts":
             sp.add_argument("--account", default="")
         if name == "disable-publishing":
@@ -704,7 +1062,15 @@ def main() -> None:
     elif args.command == "approve":
         approve_cli(config, session, args.draft_id)
     elif args.command == "reject":
-        reject_cli(config, session, args.draft_id)
+        reject_cli_multi(config, session, args.kind, args)
+    elif args.command == "approve-edit":
+        approve_edit_cli(config, session, args.post_id)
+    elif args.command == "approve-delete":
+        approve_delete_cli(config, session, args.post_id)
+    elif args.command == "approve-reply":
+        approve_reply_cli(config, session, args.comment_id)
+    elif args.command == "approve-hide":
+        approve_hide_cli(config, session, args.account, args.revoke)
     elif args.command == "disable-publishing":
         disable_publishing_cli(config, session, args.enable)
     elif args.command == "audit":

@@ -1,8 +1,12 @@
-"""Shared tool plumbing: alias resolution, serialization, and the envelope."""
+"""Shared tool plumbing: alias resolution, serialization, Publisher invoke."""
 
+import json
+import os
 from collections.abc import Callable
 from dataclasses import asdict
+from functools import lru_cache
 
+import boto3
 import httpx
 from sharedModules.errors import AccountError, CapabilityError
 from sharedModules.providers import get_provider
@@ -32,3 +36,25 @@ def provider_action(account: str, action: Callable) -> dict:
     except httpx.HTTPError as e:
         return {"ok": False, "error": f"network error talking to the provider: {e}"}
     return {"ok": True, **(result or {})}
+
+
+@lru_cache(maxsize=1)
+def _lambda_client():
+    return boto3.client("lambda")
+
+
+def invoke_publisher(event: dict) -> dict:
+    """Synchronously invoke the Publisher Lambda and parse its envelope."""
+    arn = os.environ.get("PUBLISHER_FUNCTION_ARN")
+    if not arn:
+        return {"ok": False, "error": "PUBLISHER_FUNCTION_ARN is unset (M2 deploy incomplete)"}
+    resp = _lambda_client().invoke(
+        FunctionName=arn,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(event).encode(),
+    )
+    body = resp.get("Payload").read().decode() if resp.get("Payload") else "{}"
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "publisher returned invalid JSON"}

@@ -82,8 +82,17 @@ The connect script requests a bundle by `--scopes`:
 python scripts/admin.py connect --env dev --alias main-page --scopes publish
 ```
 
-Comment write access (`pages_manage_engagement`,
-`instagram_manage_comments`) lands with M3.
+- `--scopes engagement` (M3): the above plus `pages_manage_engagement`.
+  Required for `edit_post` / `delete_post` / `reply_to_comment` /
+  `hide_comment` to reach Meta. Re-run connect with this flag once per
+  Page that needs M3 verbs:
+
+```bash
+python scripts/admin.py connect --env dev --alias main-page --scopes engagement
+```
+
+Instagram-side comment write access (`instagram_manage_comments`) lands
+with M4/M5.
 
 ## 5. (M2) Enable publishing in config
 
@@ -120,4 +129,51 @@ python scripts/admin.py approve --env dev --draft-id <id>
 python scripts/admin.py disable-publishing --env dev
 # ...and later re-enable:
 python scripts/admin.py disable-publishing --env dev --enable
+```
+
+## 7. (M3) Operator loop for edits, deletes, and comment replies
+
+Edits, deletes, and comment replies on already-published posts are not
+covered by `publish_mode: auto`: each one needs an explicit operator
+approval tied to the exact change. The pattern mirrors the draft loop:
+the agent stages the change, the operator reviews and approves, the
+Publisher reaches Meta.
+
+```bash
+# Agent (any MCP client) stages a change:
+#   edit_post(post_id='...', text='revised text')          -> staged
+#   delete_post(post_id='...', reason='spam escalated')    -> staged
+#   reply_to_comment(comment_id='...', text='thanks for the catch') -> staged
+
+# Operator reviews + approves. Each writes an approval record whose
+# hash binds to the staged payload, then invokes the Publisher inline:
+python scripts/admin.py approve-edit    --env dev --post-id <id>
+python scripts/admin.py approve-delete  --env dev --post-id <id>
+python scripts/admin.py approve-reply   --env dev --comment-id <id>
+
+# Reject a staged change (drops the staged item without touching Meta):
+python scripts/admin.py reject --env dev --kind edit   --post-id <id>
+python scripts/admin.py reject --env dev --kind delete --post-id <id>
+python scripts/admin.py reject --env dev --kind reply  --comment-id <id>
+```
+
+Hiding comments is reversible from Meta's own UI, so one standing
+per-account approval covers every hide:
+
+```bash
+# Agent calls hide_comment(comment_id='...'); first time, it is queued.
+# Operator grants the standing approval; queued hides are swept
+# through the Publisher in one call (one audit row per hide):
+python scripts/admin.py approve-hide --env dev --account main-page
+
+# Later, the agent's hide_comment calls proceed immediately. The audit
+# log still has one row per comment hidden.
+
+# Revoke the standing approval (future hides queue again, past hides
+# stay hidden on Meta):
+python scripts/admin.py approve-hide --env dev --account main-page --revoke
+
+# Drop a queued hide request without approving the account:
+python scripts/admin.py reject --env dev --kind hide-request \
+    --account main-page --comment-id <id>
 ```

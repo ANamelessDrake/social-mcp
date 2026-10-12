@@ -178,17 +178,57 @@ class FacebookProvider:
             kind=kind,
         )
 
-    def edit(self, post_id: str, patch: dict) -> None:  # pragma: no cover - M3
-        raise NotImplementedError("Facebook edit lands in milestone 3")
+    def edit_post(self, post_id: str, text: str) -> None:
+        """Edit an existing Page post's message text.
 
-    def delete(self, post_id: str) -> None:  # pragma: no cover - M3
-        raise NotImplementedError("Facebook delete lands in milestone 3")
+        Meta only allows edits on posts created by the same app
+        (DESIGN.md section 5 Facebook). A foreign-authored target comes
+        back as a 200-level AccountError via metaClient's error mapping;
+        this method surfaces that specifically so the operator sees the
+        actual reason, not "edit failed".
+        """
+        try:
+            self._client.post(f"/{post_id}", data={"message": text or ""})
+        except AccountError as e:
+            msg = str(e)
+            if "token does not belong" in msg.lower() or "foreign" in msg.lower():
+                raise AccountError(
+                    f"cannot edit post '{post_id}': edits only work on posts "
+                    "the same Meta app created"
+                ) from e
+            raise
 
-    def reply_to_comment(self, comment_id: str, text: str) -> Comment:  # pragma: no cover - M3
-        raise NotImplementedError("reply_to_comment lands in milestone 3")
+    # Protocol-shim retained for callers that still look for .edit(...)
+    def edit(self, post_id: str, patch: dict) -> None:
+        self.edit_post(post_id, (patch or {}).get("text", "") or "")
 
-    def hide_comment(self, comment_id: str) -> None:  # pragma: no cover - M3
-        raise NotImplementedError("hide_comment lands in milestone 3")
+    def delete_post(self, post_id: str) -> None:
+        """Delete a Page post (reversible for a short Meta-side window)."""
+        self._client.delete(f"/{post_id}")
+
+    # Protocol-shim retained for callers that still look for .delete(...)
+    def delete(self, post_id: str) -> None:
+        self.delete_post(post_id)
+
+    def reply_to_comment(self, comment_id: str, text: str) -> Comment:
+        """Post a reply under an existing comment and return the created comment."""
+        resp = self._client.post(f"/{comment_id}/comments", data={"message": text or ""})
+        new_id = str(resp.get("id") or "")
+        return Comment(
+            account=self.alias,
+            comment_id=new_id,
+            post_id="",  # Meta does not return the parent post id on reply create
+            thread_id=comment_id,
+            created_time="",
+            author="",
+            text=text or "",
+            is_hidden=False,
+            reply_count=0,
+        )
+
+    def hide_comment(self, comment_id: str) -> None:
+        """Hide a comment on a Page post (reversible via Meta's own UI)."""
+        self._client.post(f"/{comment_id}", data={"is_hidden": "true"})
 
     # ---------- publish helpers ----------
 

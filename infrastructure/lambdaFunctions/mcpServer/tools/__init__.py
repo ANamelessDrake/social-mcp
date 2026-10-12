@@ -8,16 +8,20 @@ use the tool, flat string/int parameters, defaults for everything optional.
 from mcp.server.fastmcp import FastMCP
 
 from . import (
+    delete_post,
     discard_draft,
     draft_post,
+    edit_post,
     get_draft,
     get_insights,
     get_post,
+    hide_comment,
     list_accounts,
     list_comments,
     list_drafts,
     list_posts,
     publish_draft,
+    reply_to_comment,
     schedule_draft,
     update_draft,
 )
@@ -38,3 +42,8 @@ def register_all(mcp: FastMCP) -> None:
     mcp.tool()(discard_draft.discard_draft)
     mcp.tool()(publish_draft.publish_draft)
     mcp.tool()(schedule_draft.schedule_draft)
+    # comments + edit + delete (M3)
+    mcp.tool()(edit_post.edit_post)
+    mcp.tool()(delete_post.delete_post)
+    mcp.tool()(reply_to_comment.reply_to_comment)
+    mcp.tool()(hide_comment.hide_comment)

@@ -1,18 +1,29 @@
-"""Core table access: accounts, drafts, approvals, audit, kill switches.
+"""Core table access: accounts, drafts, approvals, staged changes, audit.
 
 One table (`{env}-socialmcp-core`) holds every item family (DESIGN.md
-section 10):
+section 10 + 7):
 
 - `ACCOUNT#<alias>`, SK=`META` -> registry + encrypted tokens.
 - `DRAFT#<draft_id>`, SK=`META` -> drafts; GSI1 for list_drafts.
-- `APPROVAL#<draft_id>`, SK=`META` -> approval records.
+- `APPROVAL#<key>`, SK=`META` -> approval records. `<key>` is a draft_id
+  for `publish`/`schedule` scopes; for M3 scopes it is the targeted id
+  prefixed by the scope family: `edit:<post_id>`, `delete:<post_id>`,
+  `reply:<comment_id>`, or `hide:<account>` for the standing per-account
+  hide approval.
+- `EDIT#<post_id>`, `DELETE#<post_id>`, `REPLY#<comment_id>`,
+  `HIDE_REQUEST#<account>`#`<comment_id>`, SK=`META` -> staged changes
+  the MCP server writes; the Publisher reads these and the matching
+  approval record, so the operator-approved payload is what reaches
+  Meta, not whatever the agent re-sent after approval.
+- `HIDE#<account>`, SK=`META` -> standing per-account hide approval
+  (DESIGN.md section 7.1); reversible from admin.py.
 - `AUDIT#<account>`, SK=`TS#<iso8601>#<ulid>` -> append-only audit log.
 - `KILL#`, SK=`global` -> global publishing kill switch (M2).
 
-Account items are written by `scripts/admin.py connect`; drafts are written
-by the MCP server; approvals by `admin.py approve` or implicitly by
-`draft_post` on auto-mode accounts; audit rows are written by the Publisher
-and the admin CLI.
+Account items are written by `scripts/admin.py connect`; drafts and
+staged changes are written by the MCP server; approvals by `admin.py
+approve*` or implicitly by `draft_post` on auto-mode accounts; audit
+rows are written by the Publisher and the admin CLI.
 """
 
 import os
@@ -175,6 +186,7 @@ def list_drafts(account: str, status: str = "", limit: int = 20) -> list[dict]:
 
 
 def write_approval(*, draft_id: str, content_hash: str, approved_by: str, scope: str) -> None:
+    """Draft-scoped approval (publish / schedule). PK=`APPROVAL#<draft_id>`."""
     core_table().put_item(
         Item={
             "PK": f"APPROVAL#{draft_id}",
@@ -198,6 +210,180 @@ def read_approval(draft_id: str) -> dict | None:
 
 def delete_approval(draft_id: str) -> None:
     core_table().delete_item(Key={"PK": f"APPROVAL#{draft_id}", "SK": "META"})
+
+
+def write_approval_record(
+    *, key: str, content_hash: str, approved_by: str, scope: str, payload: dict | None = None
+) -> None:
+    """Non-draft approval (M3 scopes: edit / delete / reply / hide).
+
+    `key` is `edit:<post_id>` / `delete:<post_id>` / `reply:<comment_id>`
+    / `hide:<account>`. `payload` is optional context (e.g. the delete
+    reason) persisted alongside the hash, for the admin CLI to display.
+    """
+    item = {
+        "PK": f"APPROVAL#{key}",
+        "SK": "META",
+        "approval_key": key,
+        "content_hash": content_hash,
+        "approved_by": approved_by,
+        "approved_at": _now(),
+        "scope": scope,
+    }
+    if payload:
+        item["payload"] = payload
+    core_table().put_item(Item=item)
+
+
+def read_approval_record(key: str) -> dict | None:
+    resp = core_table().get_item(Key={"PK": f"APPROVAL#{key}", "SK": "META"})
+    item = resp.get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def delete_approval_record(key: str) -> None:
+    core_table().delete_item(Key={"PK": f"APPROVAL#{key}", "SK": "META"})
+
+
+# -------------------- M3 staged changes (DESIGN.md section 7.1) --------------------
+#
+# edit / delete / reply / hide each have a staged change written by the
+# tool and read by the Publisher. The staged content is the thing the
+# approval record hashes, so what the operator approved is what reaches
+# Meta, not whatever the agent re-sent after approval.
+
+
+def write_staged_edit(post_id: str, account: str, text: str, created_by: str) -> dict:
+    item = {
+        "PK": f"EDIT#{post_id}",
+        "SK": "META",
+        "post_id": post_id,
+        "account": account,
+        "text": text or "",
+        "created_by": created_by,
+        "created_at": _now(),
+    }
+    core_table().put_item(Item=item)
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def read_staged_edit(post_id: str) -> dict | None:
+    resp = core_table().get_item(Key={"PK": f"EDIT#{post_id}", "SK": "META"})
+    item = resp.get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def delete_staged_edit(post_id: str) -> None:
+    core_table().delete_item(Key={"PK": f"EDIT#{post_id}", "SK": "META"})
+
+
+def write_staged_delete(post_id: str, account: str, reason: str, created_by: str) -> dict:
+    item = {
+        "PK": f"DELETE#{post_id}",
+        "SK": "META",
+        "post_id": post_id,
+        "account": account,
+        "reason": reason or "",
+        "created_by": created_by,
+        "created_at": _now(),
+    }
+    core_table().put_item(Item=item)
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def read_staged_delete(post_id: str) -> dict | None:
+    resp = core_table().get_item(Key={"PK": f"DELETE#{post_id}", "SK": "META"})
+    item = resp.get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def delete_staged_delete(post_id: str) -> None:
+    core_table().delete_item(Key={"PK": f"DELETE#{post_id}", "SK": "META"})
+
+
+def write_staged_reply(comment_id: str, account: str, text: str, created_by: str) -> dict:
+    item = {
+        "PK": f"REPLY#{comment_id}",
+        "SK": "META",
+        "comment_id": comment_id,
+        "account": account,
+        "text": text or "",
+        "created_by": created_by,
+        "created_at": _now(),
+    }
+    core_table().put_item(Item=item)
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def read_staged_reply(comment_id: str) -> dict | None:
+    resp = core_table().get_item(Key={"PK": f"REPLY#{comment_id}", "SK": "META"})
+    item = resp.get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def delete_staged_reply(comment_id: str) -> None:
+    core_table().delete_item(Key={"PK": f"REPLY#{comment_id}", "SK": "META"})
+
+
+def write_hide_request(account: str, comment_id: str, created_by: str) -> dict:
+    item = {
+        "PK": f"HIDE_REQUEST#{account}",
+        "SK": comment_id,
+        "account": account,
+        "comment_id": comment_id,
+        "created_by": created_by,
+        "created_at": _now(),
+    }
+    core_table().put_item(Item=item)
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def list_hide_requests(account: str) -> list[dict]:
+    resp = core_table().query(
+        KeyConditionExpression="PK = :pk",
+        ExpressionAttributeValues={":pk": f"HIDE_REQUEST#{account}"},
+    )
+    return [
+        {k: v for k, v in item.items() if k not in {"PK"}}
+        for item in resp.get("Items", [])
+    ]
+
+
+def delete_hide_request(account: str, comment_id: str) -> None:
+    core_table().delete_item(Key={"PK": f"HIDE_REQUEST#{account}", "SK": comment_id})
+
+
+def write_hide_standing(account: str, approved_by: str) -> None:
+    """Standing per-account hide approval (reversible from admin.py)."""
+    core_table().put_item(
+        Item={
+            "PK": f"HIDE#{account}",
+            "SK": "META",
+            "account": account,
+            "approved_by": approved_by,
+            "approved_at": _now(),
+        }
+    )
+
+
+def read_hide_standing(account: str) -> dict | None:
+    resp = core_table().get_item(Key={"PK": f"HIDE#{account}", "SK": "META"})
+    item = resp.get("Item")
+    if item is None:
+        return None
+    return {k: v for k, v in item.items() if k not in {"PK", "SK"}}
+
+
+def delete_hide_standing(account: str) -> None:
+    core_table().delete_item(Key={"PK": f"HIDE#{account}", "SK": "META"})
 
 
 # -------------------- audit (DESIGN.md section 10) --------------------
