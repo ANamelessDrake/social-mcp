@@ -159,17 +159,17 @@ social-mcp/
       ci.yml                      # ruff + pytest + cdk synth on push/PR
   pyproject.toml                  # ruff + pytest configuration
   requirements.txt                # CDK app dependencies
+  requirements-dev.txt            # dev dependencies (ruff, pytest, httpx, moto, boto3) + -r mcpServer/requirements.txt
   cdk.json                        # {"app": "python3 bin/app.py"}
   deployCDK.sh                    # venv bootstrap, env selection, --auto-approve / --deploy-only
   bin/
     app.py                        # CDK entrypoint; loads config/{env}.json via --context env=<env>
   config/
-    example.json                  # committed template: account list, policies, send flags
+    example.json                  # committed template: account list, policies, publish modes
     README.md                     # what each field means
     (dev.json / prod.json)        # real configs, gitignored
   docs/
     architecture.md               # expanded diagrams and flows
-    authentication.md             # bearer model + provider OAuth, rotation, threat notes
     meta-setup.md                 # Meta app + Business runbook (one app, two providers)
     content-policy.md             # per-account policy fields and examples
     images/                       # diagrams, screenshots
@@ -185,6 +185,7 @@ social-mcp/
     lambdaFunctions/
       mcpServer/
         app.py                    # FastMCP app behind Lambda Web Adapter
+        run.sh                    # Web Adapter entrypoint: starts uvicorn against app:app
         tools/                    # one module per MCP tool
         auth/                     # bearer token validation middleware
         requirements.txt
@@ -198,14 +199,14 @@ social-mcp/
         registry.py               # account registry lookups (alias -> provider, state)
         policy.py                 # content-policy engine (config-driven)
         approval.py               # approval hashing + verification
-        providers/
+        providers/                # genuinely shared between mcpServer and publisher
           base.py                 # Provider protocol with declared capabilities
           facebook.py             # Facebook Pages via Graph API v26
           instagram.py            # Instagram publishing via Graph API v26
-        meta/
-          client.py               # Graph API HTTP client (retry, BUC parsing, 190 refresh)
-          errors.py               # Meta error -> plain-language mapping
-          media_staging.py        # S3 upload + presigned URL + post-publish cleanup
+          stub.py                 # Documented starting point for a new provider
+          metaClient.py           # Graph API HTTP client (retry, BUC parsing, 190 refresh)
+          metaErrors.py           # Meta error -> plain-language mapping
+          mediaStaging.py         # S3 upload + presigned URL + post-publish cleanup
   clients/
     examples/
       claude-code.mcp.json        # .mcp.json snippet for Claude Code
@@ -220,12 +221,24 @@ social-mcp/
 
 Conventions carried over from the siblings: resources named
 `{environment_name}-{project_name}-*` (e.g. `dev-socialmcp-accounts`),
-secrets named `{Env}-{Project}-<Name>`, dev and prod environments in
-us-east-1 driven entirely by the config JSON, stack wiring done in
-`bin/app.py` with cross-stack references passed as constructor arguments,
-real `config/{env}.json` gitignored with a committed `example.json`, and CI
-running `cdk synth` against `example.json` so infrastructure changes
-validate without credentials.
+secrets named `{Env}-{Project}-<Name>` (e.g. `Dev-SocialMcp-BearerToken`),
+dev and prod environments in us-east-1 driven entirely by the config JSON,
+stack wiring done in `bin/app.py` with cross-stack references passed as
+constructor arguments, real `config/{env}.json` gitignored with a committed
+`example.json`, and CI running `cdk synth` against `example.json` so
+infrastructure changes validate without credentials. The project slug is
+pinned at `project_name = "socialmcp"` and `project_name_upper =
+"SocialMcp"` in `config/example.json`; both forms are read by `bin/app.py`
+and spliced into every resource and secret name.
+
+One deliberate divergence from the siblings: `providers/` lives under
+`sharedModules/`, not under `mcpServer/` as mail-mcp has it. The reason is
+that this project has two Lambdas (MCP server and Publisher), both of
+which need the provider modules; `sharedModules/` is exactly the house
+convention for code shared across Lambdas. Meta-specific HTTP helpers
+(`metaClient.py`, `metaErrors.py`, `mediaStaging.py`) sit alongside the
+provider modules in the same directory rather than in a separate `meta/`
+subtree, matching the sibling flatness.
 
 ## 3. Provider authentication: one Meta app, one consent per owner
 
@@ -548,22 +561,31 @@ post with insights is a separate `get_post` call.
 Publishing is the only dangerous verb in the system and it is fenced
 server-side, not by the prompt.
 
-### 7.1 Separate tools, approval gate on the server
+### 7.1 Separate tools, approval record on every publish
 
 - `draft_post`, `update_draft`, `discard_draft`: do not publish. These
   validate against provider limits and the account's content policy, store
   the draft, and return the `draft_id` with a preview and warnings.
 - `publish_draft` and `schedule_draft`: operate **only** on drafts whose
-  current content hash matches a recorded approval for that draft, written
-  by the operator through `admin.py approve`. There is no "approve" tool
-  exposed to MCP clients; a confused or prompt-injected agent cannot
+  current content hash matches a recorded approval for that draft. The
+  approval record is the thing the Publisher checks; who creates it is a
+  per-account policy knob (section 7.4). In the default `publish_mode:
+  manual`, the record is created only by the operator through
+  `admin.py approve`. In `publish_mode: auto`, the server records the
+  approval implicitly at `draft_post` time, so an agent can call
+  `draft_post` and `publish_draft` back to back on that account without a
+  human in the loop. There is no "approve" tool exposed to MCP clients; a
+  confused or prompt-injected agent on a manual-mode account cannot
   self-approve.
-- Comment replies, comment hides, and post edits/deletes are also gated:
-  `reply_to_comment` and `hide_comment` act only on items the operator
-  approved (per-comment approval for replies; one-time per-account approval
-  for hides, since hiding is reversible from the admin CLI and does not
-  reach the network). `edit_post` and `delete_post` require per-post
-  approval of the specific change.
+- Comment replies, comment hides, and post edits/deletes are gated the
+  same way, but `publish_mode: auto` **does not** cover them: these verbs
+  always require per-item operator approval, because an edit, delete, or
+  reply on a published post is visible to the public immediately and
+  rolling it back costs more than drafting it twice. `reply_to_comment`
+  takes per-comment approval; `hide_comment` takes a one-time per-account
+  hide approval (hiding is reversible from the admin CLI and does not
+  reach the network, so a standing approval is fine); `edit_post` and
+  `delete_post` take per-post approval of the specific change.
 
 ### 7.2 Approval hashing
 
@@ -603,14 +625,90 @@ hash = sha256(
   "approval = exact text and media hash" has to survive the schedule-to-
   publish gap.
 
-### 7.4 Optional per-account auto-publish
+### 7.4 Per-account `publish_mode`
 
-Config may enable `auto_publish_kinds: ["text"]` on a specific account for
-low-risk kinds (text-only brand updates, for example). When enabled, the
-server treats `draft_post(kind="text", auto_publish=true)` as if the draft
-had just been approved: the hash is recorded as an implicit approval and
-the publish proceeds. Off by default on every account. Auto-publish never
-covers scheduled posts, comments, edits, or deletes.
+Approval is a trust decision; each account carries that decision in
+config so the posture can differ per Page or per Instagram account. One
+account where the agent is fully trusted ("post this to my dev
+Page right now") lives alongside another where every post needs a human
+nod ("the business Page still goes through me"), on the same deployment,
+without changing any tool call.
+
+```json
+{
+  "accounts": {
+    "dev-page": {
+      "publish_mode": "auto"
+    },
+    "main-page": {
+      "publish_mode": "manual"
+    },
+    "news-ig": {
+      "publish_mode": "auto_for",
+      "auto_for_kinds": ["text", "link"]
+    }
+  }
+}
+```
+
+- `"manual"` (**default**): every `publish_draft` and `schedule_draft`
+  needs an explicit `admin.py approve <draft_id>`. The operator reviews
+  the preview, the policy warnings, and the hash in the CLI, and types
+  `approve` or `reject`. This is the mode for your public-facing
+  accounts.
+- `"auto"`: the server records an implicit approval the moment
+  `draft_post` finishes validating against policy, so an agent calling
+  `draft_post(...)` then `publish_draft(draft_id)` back to back succeeds
+  without any operator action. Policy is still enforced (banned
+  characters, banned words, hashtag cap, link-domain allowlist) and the
+  hash is still recorded in the approval table, so the audit log is
+  unchanged. This is the mode for a dev / sandbox / internal Page where
+  the agent should just go.
+- `"auto_for"` with `auto_for_kinds`: the middle option. The server
+  auto-approves drafts whose `kind` is in `auto_for_kinds` and holds the
+  rest for manual approval. Common pattern: `auto_for_kinds: ["text"]`
+  so an agent can post status-style text without the loop but media
+  posts still get your eyes.
+
+**What `publish_mode` covers and does not cover**:
+
+| Verb | manual | auto | auto_for |
+|---|---|---|---|
+| `publish_draft` | admin.py approve | implicit at `draft_post` | implicit if `kind` in `auto_for_kinds`, else manual |
+| `schedule_draft` | admin.py approve | implicit at `draft_post` | same as above |
+| `edit_post` | admin.py approve-edit | admin.py approve-edit | admin.py approve-edit |
+| `delete_post` | admin.py approve-delete | admin.py approve-delete | admin.py approve-delete |
+| `reply_to_comment` | admin.py approve-reply | admin.py approve-reply | admin.py approve-reply |
+| `hide_comment` | standing per-account approval | standing per-account approval | standing per-account approval |
+
+Auto mode is deliberately scoped to the *write-new* verbs
+(`publish_draft`, `schedule_draft`). Edits, deletes, and replies touch
+posts that are already live and visible, which is a different risk
+profile; those stay operator-approved regardless of `publish_mode`.
+
+**Convenience tool-side shortcut**: `draft_post(..., auto_publish=true)`
+is the single-call form of "draft and publish". The server runs it as
+`draft_post` then, if the account's `publish_mode` permits it (full
+`auto`, or `auto_for` with a matching `kind`), immediately as
+`publish_draft`. On a `manual` account, `auto_publish=true` returns a
+specific error ("this account is draft-only; use `admin.py approve` or
+set `publish_mode: auto`") rather than silently queuing a draft. This
+means an agent that was told "post this to dev-page" issues one tool
+call that completes end to end, while the same agent asked to post to a
+manual account gets a clear redirect.
+
+**Changing the mode**: `publish_mode` is config, not state. Flipping an
+account from manual to auto is a deploy. There is no runtime toggle
+exposed to tools, and `admin.py` does not have a "put this account in
+auto mode" subcommand; the choice is deliberate so a prompt-injected
+agent cannot talk the server into widening its own permissions.
+
+**Scheduled posts in auto mode**: `schedule_draft` on an auto-mode
+account still schedules a future publish; the implicit approval is
+recorded at draft time and the Publisher re-checks the hash and
+re-runs policy at the scheduled moment, so an edit between schedule
+and fire still voids the approval (section 7.3). Auto mode skips the
+human review; it does not skip the content integrity check.
 
 ### 7.5 Content policy (config, not code)
 
@@ -618,6 +716,8 @@ covers scheduled posts, comments, edits, or deletes.
 {
   "accounts": {
     "main-page": {
+      "publish_enabled": true,
+      "publish_mode": "manual",
       "policy": {
         "banned_characters": ["\u2014"],
         "banned_words": ["Claude", "Anthropic"],
@@ -652,13 +752,22 @@ publish is honored.
 
 ### 7.6 Global and per-account kill switches
 
+Kill switches are separate from `publish_mode` and sit above it: they
+disable publishing outright, regardless of mode.
+
 - `publishing_enabled: false` globally in config disables every publish
   path (also toggleable at runtime by `admin.py disable-publishing`).
+  Independent of `publish_mode`; an auto-mode account still fails every
+  publish when the global switch is off.
 - `accounts.<alias>.publish_enabled: false` disables publish on one
-  account.
+  account. Independent of that account's `publish_mode`.
 - Both are checked in the Publisher, after the approval re-check, before
   the Meta call. A disabled account fails every `publish_draft` and
-  `schedule_draft` call loudly.
+  `schedule_draft` call loudly, with a specific error naming the switch
+  that is off so the operator can turn it back on without hunting.
+- Draft, edit, and read verbs still work when publishing is disabled:
+  the agent can still gather posts, read insights, and prepare drafts
+  for when publishing is turned back on.
 
 ## 8. MCP tool surface
 
@@ -669,8 +778,8 @@ pattern slack-mcp uses for `channel`).
 
 | Tool | Parameters | Notes |
 |---|---|---|
-| `list_accounts` | none | Alias, provider, display name, capabilities, publish_enabled, token health, scopes granted, expiry hint |
-| `draft_post` | `account?`, `kind`, `text?`, `link?`, `media?`, `is_ai_generated?`, `scheduled_time?`, `auto_publish?` | Validates against provider limits and account policy; stores the draft; returns `draft_id`, provider name, preview, warnings. Never publishes. `media` is a comma-separated list of S3 keys (from `stage_media`) or https URLs. `account` can be omitted when only one is configured |
+| `list_accounts` | none | Alias, provider, display name, capabilities, `publish_mode`, `publish_enabled`, token health, scopes granted, expiry hint |
+| `draft_post` | `account?`, `kind`, `text?`, `link?`, `media?`, `is_ai_generated?`, `scheduled_time?`, `auto_publish?` | Validates against provider limits and account policy; stores the draft; returns `draft_id`, provider name, preview, warnings. With `auto_publish=true` on an account whose `publish_mode` permits it (section 7.4), immediately proceeds to `publish_draft` and returns the published post id in the same call; on a `manual` account, returns a specific error. `media` is a comma-separated list of S3 keys (from `stage_media`) or https URLs. `account` can be omitted when only one is configured |
 | `get_draft` | `draft_id` | Full draft including approval status and current hash |
 | `list_drafts` | `account?`, `status?`, `limit?` | Drafts newest first; `status` filters to `awaiting_approval`, `approved`, `scheduled`, `failed` |
 | `update_draft` | `draft_id`, `text?`, `link?`, `media?`, `scheduled_time?` | Edits a draft and silently voids any existing approval |
@@ -754,7 +863,9 @@ operational visibility.
 | `user_token_ct` | (binary) | Only on the primary account per owner, for refresh |
 | `token_minted_at` | ISO 8601 | When the Page token was last refreshed |
 | `status` | `active` / `needs_reconnect` | Set on grant failure |
-| `publish_enabled` | boolean | Mirrors config; set at deploy |
+| `publish_enabled` | boolean | Mirrors config; set at deploy; kill switch (section 7.6) |
+| `publish_mode` | `manual` / `auto` / `auto_for` | Mirrors config; drives who creates the approval record (section 7.4) |
+| `auto_for_kinds` | `["text", "link"]` | Only read when `publish_mode = auto_for` |
 | `linked_ig_account` | alias | For Pages that have an IG account; back-ref |
 | `linked_page` | alias | For IG accounts; forward-ref to Page |
 
@@ -1005,7 +1116,15 @@ follow-ons.
   runs at draft time and again at publish time.
 - **Four-way publish fence**: provider scope presence, global
   `publishing_enabled`, per-account `publish_enabled`, per-item approval
-  hash match.
+  hash match. Per-account `publish_mode` (section 7.4) decides *who*
+  creates the approval record (operator in `manual`; the server
+  implicitly in `auto` or matching `auto_for`); the fence itself is the
+  same in every mode.
+- **`publish_mode` is config, not runtime state**. Flipping an account
+  from manual to auto is a deploy; there is no tool call or admin CLI
+  subcommand that widens an account's trust posture, so a
+  prompt-injected agent on a manual account cannot talk the server into
+  auto mode.
 - **Everything auditable**: `AUDIT#` items for every draft, approval,
   publish, edit, delete, reply, and hide.
 - **Function URL is the only public surface**; optional source-IP

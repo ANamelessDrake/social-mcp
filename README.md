@@ -38,9 +38,18 @@ code lands milestone by milestone (see roadmap below).
   at rest and never leave the server side.
 - **Approval gate enforced by the server, not the prompt**: `draft_post`
   stores drafts and returns a preview; `publish_draft` and `schedule_draft`
-  act only on drafts a human approved from the admin CLI; any edit after
-  approval voids it (the approval binds to a hash of the exact text and
-  media).
+  act only on drafts whose current content hash matches an approval
+  record. Any edit after approval voids it (the approval binds to a hash
+  of the exact text and media).
+- **Per-account publish mode**: each account picks one of `manual`
+  (every post needs `admin.py approve` first; default; use on
+  public-facing accounts), `auto` (the server records the approval
+  implicitly, so an agent can draft and publish in one shot; use on
+  dev / sandbox / internal pages), or `auto_for` with a kinds list
+  (auto-approve text, hold media for review). Policy, hashing, and
+  audit log work the same way in every mode; auto mode skips the
+  human review, not the content integrity check. Edits, deletes, and
+  comment replies always need operator approval regardless of mode.
 - **Content policy per account, from config**: banned characters, banned
   words, required sign-off, hashtag limit, link domain allowlist. Enforced
   at draft time and again at publish time; brand voice changes without a
