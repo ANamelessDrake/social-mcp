@@ -1,0 +1,6 @@
+# Pinned: a sibling project (slack-mcp, mail-mcp) learned the hard way that
+# mcp 2.0 removed `mcp.server.fastmcp`, which app.py imports; pin to a known
+# compatible release and bump deliberately after re-checking the import.
+mcp==1.28.1
+httpx>=0.27
+uvicorn>=0.30

@@ -1,0 +1,23 @@
+{
+  "data": [
+    {
+      "id": "100000000000001",
+      "name": "Example Page",
+      "access_token": "page-token-placeholder",
+      "instagram_business_account": {
+        "id": "200000000000001"
+      }
+    },
+    {
+      "id": "100000000000002",
+      "name": "Example Dev Page",
+      "access_token": "page-token-placeholder-2"
+    }
+  ],
+  "paging": {
+    "cursors": {
+      "before": "cursor-before",
+      "after": "cursor-after"
+    }
+  }
+}

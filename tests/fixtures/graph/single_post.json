@@ -1,0 +1,25 @@
+{
+  "id": "100000000000001_900000000000001",
+  "message": "Shipping the new deploy pipeline today. Faster synth and no more flaky rollouts.",
+  "created_time": "2026-10-10T18:04:12+0000",
+  "permalink_url": "https://www.facebook.com/100000000000001/posts/900000000000001",
+  "attachments": {
+    "data": [
+      {
+        "media_type": "album",
+        "subattachments": {
+          "data": [
+            {
+              "media_type": "photo",
+              "media": {"image": {"src": "https://example.com/img/one.jpg"}}
+            },
+            {
+              "media_type": "photo",
+              "media": {"image": {"src": "https://example.com/img/two.jpg"}}
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

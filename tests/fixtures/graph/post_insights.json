@@ -1,0 +1,59 @@
+{
+  "data": [
+    {
+      "name": "post_impressions_organic",
+      "period": "lifetime",
+      "values": [{"value": 1240}]
+    },
+    {
+      "name": "post_impressions_paid",
+      "period": "lifetime",
+      "values": [{"value": 0}]
+    },
+    {
+      "name": "post_impressions_viral",
+      "period": "lifetime",
+      "values": [{"value": 310}]
+    },
+    {
+      "name": "post_impressions_nonviral",
+      "period": "lifetime",
+      "values": [{"value": 930}]
+    },
+    {
+      "name": "post_clicks",
+      "period": "lifetime",
+      "values": [{"value": 84}]
+    },
+    {
+      "name": "post_reactions_like_total",
+      "period": "lifetime",
+      "values": [{"value": 42}]
+    },
+    {
+      "name": "post_reactions_love_total",
+      "period": "lifetime",
+      "values": [{"value": 7}]
+    },
+    {
+      "name": "post_reactions_wow_total",
+      "period": "lifetime",
+      "values": [{"value": 1}]
+    },
+    {
+      "name": "post_reactions_haha_total",
+      "period": "lifetime",
+      "values": [{"value": 0}]
+    },
+    {
+      "name": "post_reactions_sorry_total",
+      "period": "lifetime",
+      "values": [{"value": 0}]
+    },
+    {
+      "name": "post_reactions_anger_total",
+      "period": "lifetime",
+      "values": [{"value": 0}]
+    }
+  ]
+}

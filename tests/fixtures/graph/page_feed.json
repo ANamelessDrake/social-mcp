@@ -1,0 +1,37 @@
+{
+  "data": [
+    {
+      "id": "100000000000001_900000000000001",
+      "message": "Shipping the new deploy pipeline today. Faster synth and no more flaky rollouts.",
+      "created_time": "2026-10-10T18:04:12+0000",
+      "permalink_url": "https://www.facebook.com/100000000000001/posts/900000000000001",
+      "attachments": {
+        "data": [
+          {
+            "media_type": "photo",
+            "media": {"image": {"src": "https://example.com/img/deploy.jpg"}}
+          }
+        ]
+      }
+    },
+    {
+      "id": "100000000000001_900000000000002",
+      "message": "A quick post with a link.",
+      "created_time": "2026-10-09T14:00:00+0000",
+      "permalink_url": "https://www.facebook.com/100000000000001/posts/900000000000002",
+      "attachments": {
+        "data": [
+          {"media_type": "link"}
+        ]
+      }
+    },
+    {
+      "id": "100000000000001_900000000000003",
+      "message": "No attachment, just text.",
+      "created_time": "2026-10-08T09:30:00+0000",
+      "permalink_url": "https://www.facebook.com/100000000000001/posts/900000000000003",
+      "attachments": {"data": []}
+    }
+  ],
+  "paging": {"cursors": {"before": "b", "after": "a"}}
+}

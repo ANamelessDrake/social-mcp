@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "social": {
+      "type": "http",
+      "url": "<McpEndpoint output from the deploy>",
+      "headers": {
+        "Authorization": "Bearer <BearerToken secret value>"
+      }
+    }
+  }
+}

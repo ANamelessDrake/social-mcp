@@ -1,0 +1,28 @@
+{
+  "account": "111111111111",
+  "region": "us-east-1",
+  "environment_name": "example",
+  "environment_name_upper": "Example",
+  "project_name": "socialmcp",
+  "project_name_upper": "SocialMcp",
+  "alarm_email": "you@example.com",
+  "publishing_enabled": false,
+  "allowed_client_hostnames": [],
+  "accounts": [
+    {
+      "alias": "main-page",
+      "provider": "facebook",
+      "publish_enabled": false,
+      "publish_mode": "manual",
+      "auto_for_kinds": [],
+      "policy": {
+        "banned_characters": ["\u2014"],
+        "banned_words": [],
+        "required_signoff": "",
+        "max_hashtags": -1,
+        "allowed_link_domains": [],
+        "voice": "brand"
+      }
+    }
+  ]
+}
