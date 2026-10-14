@@ -1,9 +1,8 @@
 import json
 
-from aws_cdk import BundlingOptions, CfnOutput, Duration, Fn, Stack
+from aws_cdk import BundlingOptions, CfnOutput, Duration, Stack
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as _lambda
-from aws_cdk import aws_wafv2 as wafv2
 from constructs import Construct
 
 # Lambda Web Adapter public layer (see https://github.com/awslabs/aws-lambda-web-adapter)
@@ -232,19 +231,6 @@ class LambdaFunctionsStack(Stack):
             auth_type=_lambda.FunctionUrlAuthType.NONE,
             invoke_mode=_lambda.InvokeMode.RESPONSE_STREAM,
         )
-
-        # Attach the shared MCP WAF WebACL to the MCP Function URL only.
-        # The OAuth callback and the Meta webhook ingest below must stay
-        # reachable from the public internet (Meta's servers), so they
-        # intentionally stay un-attached. The in-Lambda bearer middleware
-        # still gates every MCP request as defense-in-depth.
-        if config.get("shared_waf_enabled", False):
-            wafv2.CfnWebACLAssociation(
-                self,
-                "McpFunctionUrlWafAssociation",
-                web_acl_arn=Fn.import_value("mcp-shared-WebAclArn"),
-                resource_arn=self.mcp_function.function_arn,
-            )
 
         CfnOutput(
             self,

@@ -8,7 +8,6 @@
   "alarm_email": "you@example.com",
   "publishing_enabled": false,
   "allowed_client_hostnames": [],
-  "shared_waf_enabled": false,
   "accounts": [
     {
       "alias": "main-page",
