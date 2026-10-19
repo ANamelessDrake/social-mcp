@@ -17,10 +17,20 @@ One-time runbook for the Meta Business app that drives the deployment. See
 4. Add the **Instagram Platform** product. The connect flow enumerates
    linked Instagram business accounts automatically; no further action is
    needed here for M1.
-5. Keep the app in **Development Mode**. App Review and Business
-   Verification are not required for self-admin single-tenant usage; the
-   moment you want to post to a Page or IG account you do not administer,
-   both become mandatory (DESIGN.md section 14).
+5. The app is a **Business** app; the old "Development Mode" toggle is
+   replaced by a Published / Unpublished state on the app dashboard.
+   Flip the app to **Published** once it is Live and keep it there. App
+   Review and Business Verification are not required for self-admin
+   single-tenant usage (System User token path, or Pages and Instagram
+   accounts the operator administers); the moment you want to post to a
+   Page or IG account you do not administer, both become mandatory
+   (DESIGN.md section 14). The OAuth consent flow social-mcp uses
+   (Facebook Login for Business, long-lived user token exchanged for
+   Page tokens) continues to work with the app Published. Publishing a
+   Business app that only has Facebook Login for Business enabled does
+   not open a consumer FB Login surface: Facebook Login for Business is
+   an operator-consent product, not the consumer FB Login product, so
+   random FB users cannot start a login flow against this app.
 
 ## 2. Make yourself an admin on the Pages
 
